@@ -6,7 +6,7 @@
         <field name="inherit_id" ref="base.view_model_data_list"/>
         <field name="arch" type="xml">
             <field name="res_id" position="after">
-                <field name="noupdate"/>
+                <field name="noupdate" widget="boolean_toggle" optional="show"/>
             </field>
         </field>
     </record>

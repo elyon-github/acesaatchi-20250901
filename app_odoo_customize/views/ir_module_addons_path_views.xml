@@ -4,10 +4,10 @@
         <field name="name">ir.module.addons.path.tree</field>
         <field name="model">ir.module.addons.path</field>
         <field name="arch" type="xml">
-            <tree>
+            <list>
                 <field name="name"/>
                 <field name="path"/>
-            </tree>
+            </list>
         </field>
     </record>
 
@@ -20,7 +20,7 @@
                     <div class="oe_button_box" name="button_box">
                         <button name="open_apps_view" type="object"
                                 class="oe_stat_button" icon="fa-cubes"
-                                attrs="{'invisible': [('module_count', '=', 0)]}">
+                                invisible="module_count == 0">
                             <div class="o_stat_info">
                                 <field name="module_count" class="o_stat_value"/>
                                 <span class="o_stat_text"> Modules </span>
@@ -51,7 +51,7 @@
                 <field name="path_temp"/>
                 <field name="color"/>
                 <templates>
-                    <t t-name="kanban-box">
+                    <t t-name="card">
                         <div t-attf-style="border-left: 3px solid #{record.color.raw_value}" t-attf-class="oe_kanban_global_click">
                             <div class="oe_kanban_details">
                                 <strong class="o_kanban_record_title"><field name="name"/></strong>
@@ -72,7 +72,7 @@
     <record id="action_ir_module_addons_path" model="ir.actions.act_window">
         <field name="name">Addons Paths</field>
         <field name="res_model">ir.module.addons.path</field>
-        <field name="view_mode">kanban,tree,form</field>
+        <field name="view_mode">kanban,list,form</field>
         <field name="context">{}</field>
         <field name="domain">[]</field>
     </record>

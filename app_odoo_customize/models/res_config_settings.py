@@ -58,7 +58,7 @@ class ResConfigSettings(models.TransientModel):
     # 安全与提速
     app_debug_only_admin = fields.Boolean('Debug for Admin', config_parameter='app_debug_only_admin',
                                           help="Check to only Debug / Debug Assets for Odoo Admin. Deny debug from url for other user.")
-    app_stop_subscribe = fields.Boolean('Stop Odoo Subscribe / Follow', help="Check to stop subscribe and follow. This to make odoo speed up.",
+    app_stop_subscribe = fields.Boolean('Stop Odoo Subscribe', help="Check to stop subscribe and follow. This to make odoo speed up.",
                                         config_parameter='app_stop_subscribe')
     # 处理额外模块
     module_app_odoo_doc = fields.Boolean("Help Document Anywhere", help='Get Help Documentation on current odoo operation or topic.')
@@ -68,7 +68,7 @@ class ResConfigSettings(models.TransientModel):
     app_doc_root_url = fields.Char('Help of topic domain', config_parameter='app_doc_root_url', default='https://odooai.cn')
 
     @api.model
-    def set_module_url(self):
+    def set_module_url(self, rec=None):
         if not self._app_check_sys_op():
             raise UserError(_('Not allow.'))
         config_parameter = self.env['ir.config_parameter'].sudo()
@@ -85,7 +85,6 @@ class ResConfigSettings(models.TransientModel):
     def _remove_app_data(self, o, s=[]):
         if not self._app_check_sys_op():
             raise UserError(_('Not allow.'))
-        
         for line in o:
             # 检查是否存在
             try:
@@ -125,6 +124,11 @@ class ResConfigSettings(models.TransientModel):
     def remove_sales(self):
         to_removes = [
             # 清除销售单据
+            'sale.order.return.line',
+            'sale.order.return',
+            'helpdesk.ticket',
+            'sale.order.fix.line',
+            'sale.order.fix',
             'sale.order.line',
             'sale.order',
             # 销售提成，自用
@@ -133,6 +137,8 @@ class ResConfigSettings(models.TransientModel):
             'sale.order.template.option',
             'sale.order.template.line',
             'sale.order.template',
+            'sale.requisition.line',
+            'sale.requisition',
         ]
         seqs = [
             'sale',
@@ -160,8 +166,6 @@ class ResConfigSettings(models.TransientModel):
         return self._remove_app_data(to_removes, seqs)
 
     def remove_pos(self):
-        if not self._app_check_sys_op():
-            return False
         to_removes = [
             # 清除POS单据
             'pos.payment',
@@ -187,6 +191,11 @@ class ResConfigSettings(models.TransientModel):
     def remove_purchase(self):
         to_removes = [
             # 清除采购单据
+            'purchase.order.return.line',
+            'purchase.order.return',
+            'helpdesk.ticket',
+            'purchase.order.fix.line',
+            'purchase.order.fix',
             'purchase.order.line',
             'purchase.order',
             'purchase.requisition.line',
@@ -252,6 +261,9 @@ class ResConfigSettings(models.TransientModel):
             'stock.scrap',
             'stock.picking.batch',
             'stock.inventory.adjustment.name',
+            'stock.valuation.adjustment.lines',
+            'stock.landed.cost.lines',
+            'stock.landed.cost',
             'stock.valuation.layer',
             'stock.lot',
             # 'stock.fixed.putaway.strat',
@@ -313,15 +325,22 @@ class ResConfigSettings(models.TransientModel):
         company_id = self.env.company.id
         self = self.with_company(self.env.company)
         to_removes = [
-            # 清除财务科目，用于重设
+            # 清除财务科目，用于重设。有些是企业版的也处理下
+            'account.reconcile.model',
+            'account.transfer.model.line',
+            'account.transfer.model',
             'res.partner.bank',
             # 'account.invoice',
             'account.payment',
             'account.bank.statement',
+            'account.fiscal.position.account',
+            'account.tax.repartition.line',
             # 'account.tax.account.tag',
             'account.tax',
+            'account.tax.template',
             # 'wizard_multi_charts_accounts',
             'account.account',
+            # 'account.journal',
         ]
         # todo: 要做 remove_hr，因为工资表会用到 account
         # 更新account关联，很多是多公司字段，故只存在 ir_property，故在原模型，只能用update
@@ -334,7 +353,6 @@ class ResConfigSettings(models.TransientModel):
             sql2 = "update account_journal set bank_account_id=NULL where company_id=%d;" % company_id
             self._cr.execute(sql)
             self._cr.execute(sql2)
-
             self._cr.commit()
         except Exception as e:
             _logger.error('remove data error: %s,%s', 'account_chart: set tax and account_journal', e)
@@ -348,52 +366,111 @@ class ResConfigSettings(models.TransientModel):
         # partner 处理
         try:
             rec = self.env['res.partner'].search([])
-            for r in rec:
-                r.write({
-                    'property_account_receivable_id': None,
-                    'property_account_payable_id': None,
-                })
+            rec.write({
+                'property_account_receivable_id': None,
+                'property_account_payable_id': None,
+            })
+            self._cr.commit()
         except Exception as e:
             _logger.error('remove data error: %s,%s', 'account_chart', e)
         # 品类处理
         try:
             rec = self.env['product.category'].search([])
-            for r in rec:
-                r.write({
-                    'property_account_income_categ_id': None,
-                    'property_account_expense_categ_id': None,
-                    'property_account_creditor_price_difference_categ': None,
-                    'property_stock_account_input_categ_id': None,
-                    'property_stock_account_output_categ_id': None,
-                    'property_stock_valuation_account_id': None,
-                })
+            rec.write({
+                'property_account_income_categ_id': None,
+                'property_account_expense_categ_id': None,
+                'property_account_creditor_price_difference_categ': None,
+                'property_stock_account_input_categ_id': None,
+                'property_stock_account_output_categ_id': None,
+                'property_stock_valuation_account_id': None,
+                'property_stock_journal': None,
+            })
+            self._cr.commit()
         except Exception as e:
             pass
         # 产品处理
         try:
             rec = self.env['product.template'].search([])
-            for r in rec:
-                r.write({
-                    'property_account_income_id': None,
-                    'property_account_expense_id': None,
-                })
+            rec.write({
+                'property_account_income_id': None,
+                'property_account_expense_id': None,
+                'property_account_creditor_price_difference': None,
+            })
+            self._cr.commit()
         except Exception as e:
             pass
-        # 库存计价处理
+        # pos处理，清支付，清账本
         try:
-            rec = self.env['stock.location'].search([])
-            for r in rec:
-                r.write({
-                    'valuation_in_account_id': None,
-                    'valuation_out_account_id': None,
-                })
+            rec = self.env['pos.config'].search([])
+            rec.write({
+                'invoice_journal_id': None,
+                'journal_id': None,
+                'payment_method_ids': None,
+                'fiscal_position_ids': None,
+            })
+            self._cr.commit()
+        except Exception as e:
+            pass
+        # 日记账处理
+        try:
+            rec = self.env['account.journal'].search([])
+            rec.write({
+                'account_control_ids': None,
+                'bank_account_id': None,
+                'default_account_id': None,
+                'loss_account_id': None,
+                'profit_account_id': None,
+                'suspense_account_id': None,
+            })
+            self._cr.commit()
         except Exception as e:
             pass  # raise Warning(e)
 
+        # 库存计价处理
+        try:
+            rec = self.env['stock.location'].search([])
+            rec.write({
+                'valuation_in_account_id': None,
+                'valuation_out_account_id': None,
+            })
+            self._cr.commit()
+        except Exception as e:
+            pass  # raise Warning(e)
+        # 库存计价默认值处理
+        try:
+            # 当前有些日记账的默认值要在 ir.property 处理 _set_default，比较麻烦
+            todo_list = [
+                'property_stock_account_input_categ_id',
+                'property_stock_account_output_categ_id',
+                'property_stock_valuation_account_id',
+                'property_stock_journal',
+            ]
+            for name in todo_list:
+                field_id = self.env['ir.model.fields']._get('product.category', name).id
+                prop = self.env['ir.property'].sudo().search([
+                    ('fields_id', '=', field_id),
+                ])
+                if prop:
+                    prop.unlink()
+            self._cr.commit()
+        except Exception as e:
+            pass  # raise Warning(e)
+        # 先 unlink 处理
+        j_ids = self.env['account.journal'].sudo().search([])
+        if j_ids:
+            try:
+                j_ids.unlink()
+                self._cr.commit()
+            except Exception as e:
+                pass  # raise Warning(e)
+        try:
+            c_ids = self.env['res.company'].sudo().search([])
+            c_ids.sudo().write({
+                'chart_template_id': False,
+            })
+        except Exception as e:
+            pass  # raise Warning(e)
         seqs = []
-        self.env.company.write({
-            'chart_template_id': False,
-        })
         res = self._remove_app_data(to_removes, seqs)
         return res
 
@@ -404,21 +481,15 @@ class ResConfigSettings(models.TransientModel):
             'project.task',
             # 'project.forecast',
             'project.update',
+            'project.project',
             'project.collaborator',
             'project.milestone',
             # 'project.project.stage',
             'project.task.recurrence',
             # 表名为 project_task_user_rel
             'project.task.stage.personal',
-            'project.project',
         ]
         seqs = []
-        try:
-            sql = "delete from project_sale_line_employee_map"
-            self._cr.execute(sql)
-            self._cr.commit()
-        except Exception as e:
-            _logger.error('remove data error: %s,%s', 'project: project_sale_line_employee_map', e)
         return self._remove_app_data(to_removes, seqs)
 
     def remove_quality(self):
@@ -452,6 +523,48 @@ class ResConfigSettings(models.TransientModel):
         ]
         return self._remove_app_data(to_removes)
 
+    def remove_event(self):
+        to_removes = [
+            # 清除
+            'website.event.menu',
+            'event.sponsor',
+            'event.sponsor.type',
+            'event.meeting.room',
+            'event.registration.answer',
+            'event.question.answer',
+            'event.question',
+            'event.quiz',
+            'event.quiz.answer',
+            'event.quiz.question',
+            'event.track',
+            'event.track.visitor',
+            'event.track.location',
+            'event.track.tag',
+            'event.track.tag.category',
+            'event.track.stage',
+            'event.mail.registration',
+            'event.mail',
+            'event.type.mail',
+            'event.lead.rule',
+            'event.booth.registration',
+            'event.booth',
+            'event.type',
+            'event.type.booth',
+            'event.booth.category',
+            'event.registration',
+            'event.ticket',
+            'event.type.ticket',
+            'event.event',
+            'event.stage',
+            'event.tag',
+            'event.tag.category',
+            'event.type',
+        ]
+        seqs = [
+            'event.event.',
+        ]
+        return self._remove_app_data(to_removes, seqs)
+    
     def remove_website(self):
         to_removes = [
             # 清除网站数据，w, w_blog
@@ -526,7 +639,7 @@ class ResConfigSettings(models.TransientModel):
         return True
 
     def action_set_app_doc_root_to_my(self):
-        base_url = self.env['ir.config_parameter'].get_param('web.base.url')
+        base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url')
         self.app_doc_root_url = base_url
 
     # def action_set_all_to_app_doc_root_url(self):

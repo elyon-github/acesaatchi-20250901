@@ -5,4 +5,4 @@ from odoo import api, fields, models, _
 
 
 class BaseLanguageInstall(models.TransientModel):
-    _inherit = "base.language.install"
+    _inherit = 'base.language.install'

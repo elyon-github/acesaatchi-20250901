@@ -20,15 +20,14 @@
         </rng:element>
     </rng:define>
 
-    <rng:define name="tree">
-        <rng:element name="tree">
+    <rng:define name="list">
+        <rng:element name="list">
             <rng:ref name="overload"/>
             <rng:optional><rng:attribute name="name"/></rng:optional>
             <rng:optional><rng:attribute name="create"/></rng:optional>
             <rng:optional><rng:attribute name="delete"/></rng:optional>
             <rng:optional><rng:attribute name="edit"/></rng:optional>
             <rng:optional><rng:attribute name="multi_edit"/></rng:optional>
-            <rng:optional><rng:attribute name="multi_group_select"/></rng:optional>
             <rng:optional><rng:attribute name="export_xlsx"/></rng:optional>
             <rng:optional><rng:attribute name="duplicate"/></rng:optional>
             <rng:optional><rng:attribute name="import"/></rng:optional>
@@ -36,8 +35,8 @@
             <rng:optional><rng:attribute name="class"/></rng:optional>
             <!-- Allows to take a custom View widget for handling -->
             <rng:optional><rng:attribute name="js_class"/></rng:optional>
-            <rng:optional><rng:attribute name="options"/></rng:optional>
             <rng:optional><rng:attribute name="default_order"/></rng:optional>
+            <rng:optional><rng:attribute name="default_group_by"/></rng:optional>
             <rng:optional><rng:attribute name="decoration-bf"/></rng:optional>
             <rng:optional><rng:attribute name="decoration-it"/></rng:optional>
             <rng:optional><rng:attribute name="decoration-danger"/></rng:optional>
@@ -56,10 +55,11 @@
             <rng:optional><rng:attribute name="bg-warning"/></rng:optional>
             <rng:optional><rng:attribute name="bg-black"/></rng:optional>
             <rng:optional><rng:attribute name="bg-white"/></rng:optional>
-            <rng:optional><rng:attribute name="banner_route"/></rng:optional>
+            <rng:optional><rng:attribute name="multi_group_select"/></rng:optional>
             <rng:optional><rng:attribute name="sample"/></rng:optional>
             <rng:optional><rng:attribute name="action"/></rng:optional>
             <rng:optional><rng:attribute name="type"/></rng:optional>
+            <rng:optional><rng:attribute name="open_form_view"/></rng:optional>
             <rng:optional>
                 <rng:attribute name="limit">
                     <rng:data type="int"/>
@@ -93,8 +93,9 @@
                     </rng:element>
                     <rng:ref name="control"/>
                     <rng:ref name="field"/>
+                    <rng:ref name="widget"/>
                     <rng:ref name="separator"/>
-                    <rng:ref name="tree"/>
+                    <rng:ref name="list"/>
                     <rng:ref name="groupby"/>
                     <rng:ref name="button"/>
                     <rng:ref name="filter"/>
@@ -106,7 +107,7 @@
     </rng:define>
     <rng:start>
         <rng:choice>
-            <rng:ref name="tree" />
+            <rng:ref name="list" />
         </rng:choice>
     </rng:start>
 </rng:grammar>

@@ -6,7 +6,7 @@ from odoo import api, fields, models, modules, tools, _
 _logger = logging.getLogger(__name__)
 
 class IrCron(models.Model):
-    _inherit = "ir.cron"
+    _inherit = 'ir.cron'
 
     trigger_user_id = fields.Many2one('res.users', string='Last Trigger User')
 

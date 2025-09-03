@@ -4,10 +4,10 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: Odoo Server 16.0+e-20231112\n"
+"Project-Id-Version: Odoo Server 18.0+e-20250725\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2023-12-12 14:57+0000\n"
-"PO-Revision-Date: 2023-12-12 14:57+0000\n"
+"POT-Creation-Date: 2025-08-24 09:12+0000\n"
+"PO-Revision-Date: 2025-08-24 09:12+0000\n"
 "Last-Translator: \n"
 "Language-Team: \n"
 "MIME-Version: 1.0\n"
@@ -19,8 +19,8 @@ msgstr ""
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
 msgid ""
 "<span class=\"col-3 col-lg-2 text-left\">\n"
-"\t\t\t\t\t\t\t\t\tAccounting\n"
-"\t\t\t\t\t\t\t\t</span>"
+"                                Accounting\n"
+"                            </span>"
 msgstr ""
 "<span class=\"col-3 col-lg-2 text-left\">\n"
 "                                财务\n"
@@ -35,6 +35,11 @@ msgstr "<span class=\"col-3 col-lg-2 text-left\">所有业务数据</span>"
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
 msgid "<span class=\"col-3 col-lg-2 text-left\">Base Models</span>"
 msgstr "<span class=\"col-3 col-lg-2 text-left\">基础数据</span>"
+
+#. module: app_odoo_customize
+#: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
+msgid "<span class=\"col-3 col-lg-2 text-left\">Event</span>"
+msgstr "<span class=\"col-3 col-lg-2 text-left\">活动票务</span>"
 
 #. module: app_odoo_customize
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
@@ -89,29 +94,19 @@ msgstr "<span class=\"o_stat_text\"> 模块 </span>"
 #. module: app_odoo_customize
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
 msgid "<span>Set to False to hide</span>"
-msgstr "<span>设置为 False 则不显示</span>"
+msgstr "<span>设置为 False 或 0 则不显示</span>"
 
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/js/user_menu.js:0
-#, python-format
 msgid "Activate Assets Debugging"
 msgstr "激活开发者模式 (assets)"
 
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/js/user_menu.js:0
-#: code:addons/app_odoo_customize/static/src/xml/customize_user_menu.xml:0
-#, python-format
 msgid "Activate the developer mode"
 msgstr "激活开发者模式"
-
-#. module: app_odoo_customize
-#. odoo-javascript
-#: code:addons/app_odoo_customize/static/src/xml/customize_user_menu.xml:0
-#, python-format
-msgid "Activate the developer mode (with assets)"
-msgstr "激活资源调试"
 
 #. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_ir_module_module__addons_path
@@ -134,6 +129,13 @@ msgstr "模块路径"
 #: model:ir.model.fields,field_description:app_odoo_customize.field_res_config_settings__module_app_chatgpt
 msgid "Ai Center"
 msgstr "Ai服务中心"
+
+#. module: app_odoo_customize
+#: model:ir.actions.act_window,name:app_odoo_customize.action_ir_module_category_list
+#: model:ir.ui.menu,name:app_odoo_customize.menu_ir_module_category_list
+#: model:ir.ui.menu,name:app_odoo_customize.menu_ir_module_category_list_user
+msgid "Application Access Category"
+msgstr "应用权限分类"
 
 #. module: app_odoo_customize
 #: model:ir.model.fields.selection,name:app_odoo_customize.selection__res_config_settings__app_navbar_pos_mobile__bottom
@@ -177,10 +179,10 @@ msgstr "配置设置"
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.replace_copyright_name
 msgid ""
 "Copyright &amp;copy;\n"
-"\t            <span class=\"copyright_name_before\" contenteditable=\"true\">2009-2024 </span>"
+"\t            <span class=\"copyright_name_before\" contenteditable=\"true\">2009-2025 </span>"
 msgstr ""
 "版权所有 &amp;copy;\n"
-"\t            <span class=\"copyright_name_before\" contenteditable=\"true\">2009-2024 </span>"
+"\t            <span class=\"copyright_name_before\" contenteditable=\"true\">2009-2025 </span>"
 
 #. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_ir_module_addons_path__create_uid
@@ -203,13 +205,6 @@ msgid "Data Cleaning (Be careful to do that!)"
 msgstr "数据清理（请谨慎操作！）"
 
 #. module: app_odoo_customize
-#. odoo-javascript
-#: code:addons/app_odoo_customize/static/src/xml/customize_user_menu.xml:0
-#, python-format
-msgid "Deactivate the developer mode"
-msgstr "退出开发者模式"
-
-#. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_res_config_settings__app_debug_only_admin
 msgid "Debug for Admin"
 msgstr "仅系统管理员可调试"
@@ -218,6 +213,11 @@ msgstr "仅系统管理员可调试"
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
 msgid "Delete All BOM"
 msgstr "删除所有物料清单"
+
+#. module: app_odoo_customize
+#: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
+msgid "Delete All Event"
+msgstr "删除所有活动订单"
 
 #. module: app_odoo_customize
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
@@ -307,13 +307,6 @@ msgid "Developer Documentation Url"
 msgstr "开发者手册链接"
 
 #. module: app_odoo_customize
-#. odoo-javascript
-#: code:addons/app_odoo_customize/static/src/xml/customize_user_menu.xml:0
-#, python-format
-msgid "Developer Manual"
-msgstr "开发手册"
-
-#. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_ir_module_addons_path__display_name
 msgid "Display Name"
 msgstr "显示名称"
@@ -321,7 +314,6 @@ msgstr "显示名称"
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/js/user_menu.js:0
-#, python-format
 msgid "Documentation"
 msgstr "支持文档"
 
@@ -333,7 +325,6 @@ msgstr "用户手册链接"
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/xml/res_config_edition.xml:0
-#, python-format
 msgid "Edition)"
 msgstr "版）"
 
@@ -352,6 +343,11 @@ msgstr "导出翻译"
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
 msgid "Extra Feature"
 msgstr "增强功能"
+
+#. module: app_odoo_customize
+#: model_terms:ir.ui.view,arch_db:app_odoo_customize.app_view_model_form
+msgid "Fields List"
+msgstr "字段列表"
 
 #. module: app_odoo_customize
 #: model:ir.model.fields,help:app_odoo_customize.field_res_config_settings__module_app_odoo_doc
@@ -378,27 +374,17 @@ msgstr "即时查看帮助"
 #. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_res_config_settings__app_doc_root_url
 msgid "Help of topic domain"
-msgstr "帮助主域名"
+msgstr "支持文档根域名"
 
 #. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_ir_module_addons_path__id
 msgid "ID"
-msgstr ""
+msgstr "Id"
 
 #. module: app_odoo_customize
 #: model:ir.model,name:app_odoo_customize.model_base_language_install
 msgid "Install Language"
 msgstr "安装语言"
-
-#. module: app_odoo_customize
-#: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
-msgid "Internal User UI"
-msgstr "后台用户界面"
-
-#. module: app_odoo_customize
-#: model:ir.model.fields,field_description:app_odoo_customize.field_ir_module_addons_path____last_update
-msgid "Last Modified on"
-msgstr "上次修改时间"
 
 #. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_ir_module_addons_path__write_uid
@@ -413,7 +399,6 @@ msgstr "最后更新于"
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/js/user_menu.js:0
-#, python-format
 msgid "Leave the Developer Tools"
 msgstr "离开开发者模式"
 
@@ -450,6 +435,11 @@ msgid "Module Count"
 msgstr "模块计数"
 
 #. module: app_odoo_customize
+#: model:ir.model.fields,field_description:app_odoo_customize.field_ir_module_module__module_type
+msgid "Module Type"
+msgstr "模块类型"
+
+#. module: app_odoo_customize
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.ir_module_addons_path_kanban_view
 msgid "Modules"
 msgstr "模块"
@@ -475,27 +465,50 @@ msgid "Navbar PC"
 msgstr "导航栏电脑"
 
 #. module: app_odoo_customize
+#: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
+msgid "Navigator"
+msgstr "导航栏"
+
+#. module: app_odoo_customize
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.app_view_model_data_search
 msgid "No Updatable"
 msgstr "无需更新"
 
 #. module: app_odoo_customize
-#: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
-msgid "OEM & Boost"
-msgstr "定制与增强"
+#: model_terms:ir.actions.act_window,help:app_odoo_customize.action_ir_module_category_list
+msgid "No data yet!"
+msgstr "没有数据。"
+
+#. module: app_odoo_customize
+#. odoo-python
+#: code:addons/app_odoo_customize/models/res_config_settings.py:0
+msgid "Not allow."
+msgstr "禁止"
 
 #. module: app_odoo_customize
 #: model:ir.actions.act_window,name:app_odoo_customize.action_app_theme_config
-#: model:ir.ui.menu,name:app_odoo_customize.menu_app_theme_config
 msgid "OEM and Boost"
-msgstr "odoo定制OEM及增强"
+msgstr "odoo OEM定制与增强"
 
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/xml/res_config_edition.xml:0
-#, python-format
 msgid "Odoo"
 msgstr "Odoo欧度"
+
+#. module: app_odoo_customize
+#: model:ir.actions.act_window,name:app_odoo_customize.action_module_odooapp
+#: model:ir.model.fields.selection,name:app_odoo_customize.selection__ir_module_module__module_type__odooapp_cn
+#: model:ir.ui.menu,name:app_odoo_customize.menu_module_odooapp
+#: model_terms:ir.ui.view,arch_db:app_odoo_customize.app_view_module_filter
+msgid "Odoo中文应用"
+msgstr ""
+
+#. module: app_odoo_customize
+#: model:ir.actions.act_url,name:app_odoo_customize.action_odooapp_store
+#: model:ir.ui.menu,name:app_odoo_customize.menu_odooapp_store
+msgid "Odoo中文应用商店"
+msgstr ""
 
 #. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_ir_module_addons_path__path
@@ -522,19 +535,12 @@ msgstr "技术支持 <span>odooai.cn</span>"
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/js/user_menu.js:0
-#, python-format
 msgid "Preferences"
 msgstr "偏好"
 
 #. module: app_odoo_customize
-#: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
-msgid "Public User UI"
-msgstr "网站用户界面"
-
-#. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/js/user_menu.js:0
-#, python-format
 msgid "Refresh Page"
 msgstr "刷新本页"
 
@@ -558,6 +564,12 @@ msgstr "计划任务"
 #: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
 msgid "Security and Boost"
 msgstr "安全与提速"
+
+#. module: app_odoo_customize
+#. odoo-javascript
+#: code:addons/app_odoo_customize/static/src/xml/debug_templates.xml:0
+msgid "Sequence:"
+msgstr "序号:"
 
 #. module: app_odoo_customize
 #: model:ir.model.fields,help:app_odoo_customize.field_res_config_settings__app_system_name
@@ -637,13 +649,12 @@ msgstr "显示支持"
 
 #. module: app_odoo_customize
 #: model:ir.model.fields,field_description:app_odoo_customize.field_res_config_settings__app_stop_subscribe
-msgid "Stop Odoo Subscribe / Follow"
+msgid "Stop Odoo Subscribe"
 msgstr "停止Odoo订阅"
 
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/js/user_menu.js:0
-#, python-format
 msgid "Support"
 msgstr "技术支持"
 
@@ -665,7 +676,6 @@ msgstr "系统参数"
 #. module: app_odoo_customize
 #. odoo-python
 #: code:addons/app_odoo_customize/models/ir_module_module.py:0
-#, python-format
 msgid ""
 "The languages that you selected have been successfully update."
 "                            You still need to Upgrade the apps to make it "
@@ -754,11 +764,9 @@ msgid "User Menu Content"
 msgstr "菜单项具体操作设置"
 
 #. module: app_odoo_customize
-#: model_terms:ir.ui.view,arch_db:app_odoo_customize.view_app_theme_config_settings
-msgid ""
-"Visit our website for more apps and Support.\n"
-"\t\t\t\t\t\t\t\t\t\t\t\t\thttps://www.odooai.cn"
-msgstr "请访问我们的网站获取更多支持. http://www.odooai.cn"
+#: model_terms:ir.ui.view,arch_db:app_odoo_customize.app_view_model_form
+msgid "Views List"
+msgstr "视图列表"
 
 #. module: app_odoo_customize
 #: model:ir.model,name:app_odoo_customize.model_web_environment_ribbon_backend
@@ -796,13 +804,23 @@ msgid "When enable,everyone login can see the debug menu"
 msgstr "启用后，会显示快速调试菜单"
 
 #. module: app_odoo_customize
+#. odoo-javascript
+#: code:addons/app_odoo_customize/static/src/xml/debug_templates.xml:0
+msgid "XMLID:"
+msgstr "XmlId"
+
+#. module: app_odoo_customize
 #: model:ir.ui.menu,name:app_odoo_customize.menu_app_group
 msgid "odooAi"
-msgstr "odooAi"
+msgstr ""
+
+#. module: app_odoo_customize
+#: model:ir.ui.menu,name:app_odoo_customize.menu_odooai_cloud_config
+msgid "odooAi Cloud"
+msgstr "odooAi云面板"
 
 #. module: app_odoo_customize
 #. odoo-javascript
 #: code:addons/app_odoo_customize/static/src/xml/res_config_edition.xml:0
-#, python-format
 msgid "odooai.cn"
-msgstr "odooai.cn"
+msgstr "odooAi.cn"

@@ -22,23 +22,25 @@
 # description:
 
 {
-    'name': 'odoo17 Tweak,Ai Employee,Boost,Customize All in One. Customize,UI,Boost,Security,Data',
-    'version': '16.24.03.13',
+    'name': '53+ Odoo18 Tweak OEM Development Enhance.Boost,Customize,Ai Employee,UI,Security,Remove Data All in One-优化提速53+项大全',
+    'version': '18.0.25.08.26',
     'author': 'odooai.cn',
     'category': 'Extra Tools',
     'website': 'https://www.odooai.cn',
     'live_test_url': 'https://demo.odooapp.cn',
     'license': 'LGPL-3',
     'sequence': 2,
-    'images': ['static/description/banner.gif'],
+    'images': ['static/description/banner.gif', 'static/description/banner.png'],
     'summary': """
-    Ai as employee.1 click Tweak odoo. 48 Functions odoo enhancement. for Customize,UI,Boost Security,Development.
+    52+ Odoo Enhance in 1 click Tweak odoo. Change Odoo to your OEM brand.all in one odoo enhancement. for Customize,UI,Boost Security,Development.
     Easy reset data, clear data, reset account chart, reset Demo data.
     For quick debug. Set brand,Language Switcher all in one.
     """,
     'depends': [
         'app_common',
         'base_setup',
+        'base_import',
+        'base_import_module',
         'portal',
         'mail',
         # 'digest',
@@ -49,26 +51,25 @@
         'security/res_groups.xml',
         'security/ir.model.access.csv',
         'views/app_odoo_customize_views.xml',
-        'views/app_theme_config_settings_views.xml',
         'views/res_config_settings_views.xml',
         'views/ir_views.xml',
-        'views/ir_module_module_views.xml',
-        'views/ir_translation_views.xml',
+        'views/ir_actions_act_window_views.xml',
         'views/ir_module_addons_path_views.xml',
+        'views/ir_module_module_views.xml',
+        'views/ir_module_category_views.xml',
+        'views/ir_sequence_views.xml',
         'views/ir_ui_menu_views.xml',
         'views/ir_ui_view_views.xml',
-        'views/ir_model_fields_views.xml',
         'views/ir_model_data_views.xml',
+        'views/ir_model_fields_views.xml',
+        'views/ir_model_views.xml',
         # data
         'data/ir_config_parameter_data.xml',
         'data/ir_module_module_data.xml',
         # 'data/digest_template_data.xml',
-        'data/res_company_data.xml',
+        # 'data/res_company_data.xml',
         'data/res_config_settings_data.xml',
     ],
-    # 'qweb': [
-    #     'static/src/xml/*.xml',
-    # ],
     'assets': {
         'web.assets_backend': [
             'app_odoo_customize/static/src/scss/app.scss',
@@ -78,9 +79,12 @@
             'app_odoo_customize/static/src/js/ribbon.js',
             'app_odoo_customize/static/src/js/dialog.js',
             'app_odoo_customize/static/src/js/navbar.js',
+            'app_odoo_customize/static/src/js/base_import_list_renderer.js',
+            'app_odoo_customize/static/src/js/base_import_list_renderer.js',
             'app_odoo_customize/static/src/webclient/*.js',
-            'app_odoo_customize/static/src/webclient/*.xml',
+            'app_odoo_customize/static/src/webclient/user_menu.xml',
             'app_odoo_customize/static/src/xml/res_config_edition.xml',
+            'app_odoo_customize/static/src/xml/base_import.xml',
             'app_odoo_customize/static/src/xml/debug_templates.xml',
         ],
     },
@@ -92,10 +96,8 @@
     'description': """
     App Customize Odoo (Change Title,Language,Documentation,Quick Debug)
     ============
-    For Odoo17. Please get from the follow github. Done for 85%.
-    https://github.com/guohuadeng/app-odoo/tree/17.0
     White label odoo. UI and Development Enhance.
-    Support odoo 17,16,15,14,13,12,11,10,9.
+    Support Odoo 18,17,16,15,14,13,12,11,10,9.
     You can config odoo, make it look like your own platform.
     ============
     1. Deletes Odoo label in footer
@@ -119,7 +121,7 @@
     19. One Click to clear all data (Sometime pls click twice)
     20. Show quick upgrade in app dashboard, click to show module info not go to odoo.com
     21. Can clear and reset account chart. Be cautious
-    22. Update online manual and developer document to odoo12
+    22. Update online manual and developer document to odoo16
     23. Add reset or clear website blog data
     24. Customize Odoo Native Module(eg. Enterprise) Url
     25. Add remove expense data
@@ -145,14 +147,19 @@
     45. Add addons path info to module.
     46. Add Help documentation anywhere.  easy get help for any odoo operation or action.
     47. Add ai robot app integration. Use Ai as your employee.
-    48. Add menu debug information of action and xml id.
+    48. Add configurable Test Label, Demo Ribbon on top menu.
+    49. Add SaaS client switch for online Translate sync(18 only).
+    50. Quick Menu manager. de-active / active menu.
+    51. Show menu xml_id in debug asset mode.  easy for menu and action development.
+    52. Quick View Fields list and View List of every model.
+    53. Quick management and view of [Application Access Category].
 
     This module can help to white label the Odoo.
     Also helpful for training and support for your odoo end-user.
     The user can get the help document just by one click.
     ## 在符合odoo开源协议的前提下，自定义你的odoo系统
     可完全自行设置下列选项，将 odoo 整合进自有软件产品
-    支持odoo 17,16,15,14,13,12, 11, 10, 9 版本，社区版企业版通用
+    支持Odoo 18,17,16,15,14,13,12, 11, 10, 9 版本，社区版企业版通用
     ============
     1. 删除菜单导航页脚的 Odoo 标签
     2. 将弹出窗口中 "Odoo" 设置为自定义名称
@@ -164,7 +171,7 @@
     8. 在用户菜单中增加开发者手册，含python教程，jquery参考，Jinja2模板，PostgresSQL参考
     9. 在用户菜单中自定义"My odoo.com account"
     10. 单独设置面板，每个选项都可以自定义
-    11. 提供236个国家的国旗文件（部份需要自行设置文件名）
+    11. 提供236个国家/地区的国旗文件（部份需要自行设置文件名）
     12. 多语言版本
     13. 自定义登陆界面中的 Powered by Odoo
     14. 快速删除测试数据，支持模块包括：销售/POS门店/采购/生产/库存/会计/项目/消息与工作流等.
@@ -201,6 +208,11 @@
     45. 为应用模块增加模块路径信息
     46. 增加快速帮助文档，可以在任意操作中获取相关的 odoo 帮助.
     47. 增加Ai模块相关信息，可以快速访问ai模块，使用ai员工.
-    48. 增加菜单Debug，可以快速查看每个菜单的调试信息如 action 及 xml id.
+    48. 增加可配置的系统调试标签，用于系统测试期提示.
+    49. 增加 SaaS 客户端开头，可让用户安装在线翻译同步模块及在线更新(仅odoo18).
+    50. 快速菜单管理，快速禁用/启用菜单.
+    51. 在开发者Assets模式中，快速查看菜单Menu 的 xml_id.
+    52. 快速管理查看模型的字段和视图列表.
+    53. 快速管理查看应用权限分类管理.
     """,
 }

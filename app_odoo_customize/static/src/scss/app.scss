@@ -1,5 +1,5 @@
-.o_user_menu  .dropdown-menu img,
-.o_user_menu_mobile  .dropdown-item  img {
+.o-overlay-container  .dropdown-menu img.flag,
+.o_user_menu_mobile  .dropdown-item  img.flag {
     height: 20px;
     margin: 2px;
 }
@@ -21,7 +21,7 @@
 .o_web_client.navbar_pos_bottom {
 
   @media (max-width: 768px) {
-    --o-navbar-height: 80px;
+    --o-navbar-height: 46px;
   }
   flex-direction: column-reverse!important;
   .o_navbar {
@@ -29,13 +29,27 @@
 
     .o_main_navbar {
       @media (max-width: 768px) {
-        --o-navbar-height: 80px;
+        --o-navbar-height: 46px;
         padding: 0 var(--o-navbar-height);
+        .o_navbar_apps_menu .dropdown-toggle, .o_nav_entry, .dropdown-toggle:not(.o-dropdown-toggle-custo), .o_menu_toggle {
+          align-items: baseline;
+          font-size: 1.5rem;
+        }
+        .o_menu_toggle  {
+          margin-top: 10px;
+        }
+        .o_burger_menu_avatar.o_image_24_cover  {
+          width: 36px;
+          height: 36px;
+        }
+        .o-mail-DiscussSystray-class  {
+          margin-bottom: 10px;
+        }
       }
-
-      button.o_mobile_menu_toggle, .o_menu_systray .o_debug_manager .dropdown-toggle {
-        font-size: 2em;
-      }
+      //
+      //button.o_mobile_menu_toggle, .o_menu_systray .o_debug_manager .dropdown-toggle {
+      //  font-size: 1.5rem;
+      //}
 
       //  toggle处理
       .dropdown .dropdown-toggle::after {
@@ -85,3 +99,18 @@
 // Colors replace to ent
 //$o-community-color: #875A7B;
 
+.custom-tooltip {
+  background: #222;
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  pointer-events: none;
+  white-space: pre-line;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  max-width: 320px;
+  opacity: 0.98;
+  font-family: system-ui, sans-serif;
+  position: absolute;
+  z-index: 9999;
+}

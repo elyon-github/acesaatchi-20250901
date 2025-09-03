@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
-from odoo import models, fields, api, _
-from odoo.tools import DEFAULT_SERVER_DATE_FORMAT, DEFAULT_SERVER_DATETIME_FORMAT
-from odoo.http import request
 
 import requests
 import base64
 from io import BytesIO
 import uuid
-
+from PIL import Image
 from datetime import date, datetime, time
 import pytz
 
 import logging
+
+from odoo import models, fields, api, _
+from odoo.tools import DEFAULT_SERVER_DATE_FORMAT, DEFAULT_SERVER_DATETIME_FORMAT
+from odoo.http import request
+from ..lib.user_agents import parse
 
 _logger = logging.getLogger(__name__)
 
@@ -75,7 +77,10 @@ class Base(models.AbstractModel):
             else:
                 if not domain:
                     domain = self._fields[fieldname].domain or []
-                rec = self.env[self._fields[fieldname].comodel_name].sudo().search(domain, limit=1)
+                try:
+                    rec = self.env[self._fields[fieldname].comodel_name].search(domain, limit=1)
+                except Exception as e:
+                    rec = self.env[self._fields[fieldname].comodel_name].search([], limit=1)
                 return rec.id if rec else False
         return False
 
@@ -125,6 +130,9 @@ class Base(models.AbstractModel):
                     'datas': image,
                     'name': file_name,
                     'website_id': False,
+                    'res_model': self._name,
+                    'res_id': self.id,
+                    'public': True,
                 })
                 attachment.generate_access_token()
                 return attachment
@@ -145,6 +153,9 @@ class Base(models.AbstractModel):
                     'datas': image,
                     'name': file_name,
                     'website_id': False,
+                    'res_model': self._name,
+                    'res_id': self.id,
+                    'public': True,
                 })
                 attachment.generate_access_token()
                 return attachment
@@ -153,9 +164,39 @@ class Base(models.AbstractModel):
                 return False
         else:
             return False
-
+        
+    @api.model
+    def _get_video_url2attachment(self, url):
+        if not self._app_check_sys_op():
+            return False
+        video, file_name = get_video_url2attachment(url)
+        if video and file_name:
+            try:
+                attachment = self.env['ir.attachment'].create({
+                    'datas': video,
+                    'name': file_name,
+                    'website_id': False,
+                    'res_model': self._name,
+                    'res_id': self.id,
+                    'public': True,
+                })
+                attachment.generate_access_token()
+                return attachment
+            except Exception as e:
+                _logger.error('get_video_url2attachment error: %s' % str(e))
+                return False
+        else:
+            return False
+    
+    @api.model
     def get_ua_type(self):
         return get_ua_type()
+    
+    @api.model
+    def deep_merge(self, a, b):
+        # todo: 此处只处理2级，后续如需更深级别可以使用第三方库
+        # from deepmerge import always_merger
+        return deep_merge(a, b)
 
 def get_image_from_url(url):
     if not url:
@@ -188,14 +229,35 @@ def get_image_base642attachment(data):
         return None
     try:
         image_data = data.split(',')[1]
-        file_name = str(uuid.uuid4()) + '.png'
-        return image_data, file_name
+        img = Image.open(BytesIO(base64.b64decode(image_data)))
+        img = img.convert('RGB')
+        output = BytesIO()
+        img.save(output, format='JPEG')
+        file_name = str(uuid.uuid4()) + '.jpeg'
+        jpeg_data = output.getvalue()
+        jpeg_base64 = base64.b64encode(jpeg_data)
+        return jpeg_base64, file_name
     except Exception as e:
         return None, None
-
+    
+def get_video_url2attachment(url):
+    if not url:
+        return None
+    try:
+        if url.startswith('//'):
+            url = 'https:%s' % url
+        response = requests.get(url, timeout=90)
+        video_content = response.content
+    except Exception as e:
+        return None, None
+    # return this video in base64
+    base64_video = base64.b64encode(video_content)
+    file_name = url.split('/')[-1]
+    return base64_video, file_name
 
 def get_ua_type():
     ua = request.httprequest.headers.get('User-Agent')
+    ua_parse = str(parse(ua))
     # 临时用 agent 处理，后续要前端中正确处理或者都从后台来
     # 微信浏览器
     #  MicroMessenger: Mozilla/5.0 (Linux; Android 10; ELE-AL00 Build/HUAWEIELE-AL00; wv)
@@ -237,5 +299,24 @@ def get_ua_type():
         utype = 'native_android'
     elif 'BytedanceWebview' in ua:
         utype = 'dyweb'
+    elif 'Chrome Mobile' in ua_parse or 'Mobile Safari' in ua_parse:
+    #     增加移动端 web
+        utype = 'mweb'
     # _logger.warning('=========get ua %s,%s' % (utype, ua))
     return utype
+def deep_merge(a, b):
+    """
+    深度合并两个二级 dict，对数值进行叠加，以b为主。
+    如果 a 和 b 有相同的键，则对它们的值进行合并；
+    如果值是 dict，则递归处理；
+    否则将 b 的值更新至 a 上。
+    """
+    for key in b:
+        if key in a:
+            if isinstance(a[key], dict) and isinstance(b[key], dict):
+                deep_merge(a[key], b[key])
+            else:
+                a[key] = b[key]
+        else:
+            a[key] = b[key]
+    return a
