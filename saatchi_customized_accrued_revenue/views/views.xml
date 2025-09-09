@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <!-- Action for the model -->
+    <record id="action_saatchi_customized_accrued_revenue" model="ir.actions.act_window">
+        <field name="name">Accrued Revenues</field>
+        <field name="res_model">saatchi.accrued_revenue</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- Menu item under Sales Orders -->
+    <menuitem id="menu_saatchi_customized_accrued_revenue"
+              name="Accrued Revenues"
+              parent="sale.menu_sale_order"
+              sequence="3"
+              action="action_saatchi_customized_accrued_revenue"/>
+
+    <!-- List view -->
+    <record id="view_saatchi_customized_accrued_revenue_list" model="ir.ui.view">
+        <field name="name">saatchi.accrued_revenue.list</field>
+        <field name="model">saatchi.accrued_revenue</field>
+        <field name="arch" type="xml">
+            <list string="Accrued Revenues">
+                <field name="related_ce_id"/>
+                <field name="ce_partner_id"  widget="res_partner_many2one"/>
+                <field name="ce_status"/>
+                <field name="ce_job_description"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Form view -->
+    <record id="view_saatchi_customized_accrued_revenue_form" model="ir.ui.view">
+        <field name="name">saatchi.accrued_revenue.form</field>
+        <field name="model">saatchi.accrued_revenue</field>
+        <field name="arch" type="xml">
+            <form string="Accrued Revenue">
+                <sheet>
+                    <group>
+
+                         <group>
+                            <field name="related_ce_id"/>
+                            <field name="ce_partner_id"/>
+                            <field name="ce_status"/>
+                            <field name="ce_job_description"/>
+                        </group>
+                         <group>
+                            <field name="journal_id"/>
+                            <field name="accrual_account_id"/>
+                            <field name="date"/>
+                            <field name="reversal_date"/>
+                        </group>
+                    </group>
+                    <group>
+
+                        <notebook>
+                            <page string="Accrued Lines">
+                                <field name="line_ids">
+                                    <list editable="bottom">
+                                        <field name="sequence" widget="handle"/>
+                                        <field name="account_id"/>
+                                        <field name="ce_line_id"/>
+                                        <field name="label"/>
+                                        <field name="debit"/>
+                                        <field name="credit"/>
+                                    </list>
+                                </field>
+                            </page>
+                        </notebook>
+
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+
+        <!-- <record id="view_order_form_inherit_custom_accrued" model="ir.ui.view">
+        <field name="name">sale.order.form.inherit.custom.accrued</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+
+            <xpath expr="//header" position="inside">
+                <button name="action_create_custom_accrued_revenue" 
+                        type="object" 
+                        string="Create Custom Accrued Revenue"
+                        class="btn-secondary"
+                        invisible="state not in ['sale', 'done']"/>
+            </xpath>
+        </field>
+    </record> -->
+</odoo>
