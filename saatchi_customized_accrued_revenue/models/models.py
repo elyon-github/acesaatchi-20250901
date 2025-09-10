@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-from odoo import models, fields, api
+from odoo import models, fields, api, _, Command
 from odoo.exceptions import UserError
-
+from dateutil.relativedelta import relativedelta
 
 class SaatchiCustomizedAccruedRevenue(models.Model):
     _name = 'saatchi.accrued_revenue'
     _description = 'Saatchi Customized Accrued Revenue'
-
+    _rec_name = 'display_name'
+    _inherit = ['mail.thread', 'mail.activity.mixin']  # Add this line for chatter
+    display_name = fields.Char(compute="_compute_display_name")
+    
     related_ce_id = fields.Many2one('sale.order', string="CE#", readonly=True)
 
     ce_partner_id = fields.Many2one(
@@ -65,7 +68,7 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
     )
 
     reversal_date = fields.Date(
-        string="Reversal Date"
+        string="Reversal Date", compute="_compute_reversal_date", store=True, readonly=False
     )
 
     currency_id = fields.Many2one(
@@ -81,6 +84,49 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
         store=True
     )
     
+    state = fields.Selection(
+        [
+            ('new', 'New'),
+            ('accrued', 'Accrued'),
+            ('reversed', 'Reversed'),
+            ('cancel', 'cancelled')
+        ],
+        string="Status",
+        default='new',
+        required=True,
+        store=True,
+        compute="_compute_state"
+    )
+
+    related_accrued_entry = fields.Many2one('account.move', readonly=True,string="Accrued Entry")
+    related_reverse_accrued_entry = fields.Many2one('account.move', readonly=True,string="Reverse Acrrue Entry")
+    
+    @api.depends('related_accrued_entry.state', 'related_reverse_accrued_entry.state')
+    def _compute_state(self):
+        for record in self:
+            if not record.related_accrued_entry and not record.related_reverse_accrued_entry:
+                record.state = 'new'
+            elif record.related_accrued_entry and record.related_reverse_accrued_entry:
+                if record.related_accrued_entry.state == 'posted' and record.related_reverse_accrued_entry.state == 'draft':
+                    record.state = 'accrued'
+                elif (record.related_accrued_entry.state == 'cancel' or
+                      record.related_reverse_accrued_entry.state == 'cancel'):
+                    record.state = 'cancel'
+                elif (record.related_accrued_entry.state == 'posted' and
+                      record.related_reverse_accrued_entry.state == 'posted'):
+                    record.state = 'reversed'
+                else:
+                    record.state = 'new'
+            else:
+                record.state = 'new'
+
+
+            
+        
+    def _compute_display_name(self):
+        for record in self:
+            record.display_name = f'{record.related_ce_id.name} - {record.id}'
+        
     @api.depends('line_ids.credit')
     def _compute_total_debit_in_accrue_account(self):
         for record in self:
@@ -95,6 +141,21 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
         required=True,
         default=lambda self: self.env.company
     )
+
+    def write(self, vals):
+        result = super().write(vals)
+        if 'accrual_account_id' in vals:
+            for record in self:
+                if record.accrual_account_id:
+                    record.update_total_accrued_account_id()
+
+    @api.depends('date')
+    def _compute_reversal_date(self):
+        for record in self:
+            if not record.reversal_date or record.reversal_date <= record.date:
+                record.reversal_date = record.date + relativedelta(days=1)
+            else:
+                record.reversal_date = record.reversal_date
     
     @api.depends("related_ce_id")
     def _compute_ce_fields(self):
@@ -110,6 +171,13 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
 
     
 
+    def update_total_accrued_account_id(self):
+        """Update or create the Total Accrued line with the computed total"""
+        for record in self:
+            accrued_total_line = record.line_ids.filtered(lambda l: l.label == 'Total Accrued')
+            accrued_total_line.write({'account_id': record.accrual_account_id})
+
+    
     def update_total_accrued_line(self):
         """Update or create the Total Accrued line with the computed total"""
         for record in self:
@@ -137,7 +205,7 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
                 #         'debit': total,
                 #         'credit': 0.0,
                 #         'account_id': record.accrual_account_id.id,
-                #         'sequence': 9999,  # Put it at the top,
+                #         'sequence': 9999,  # Put it at the top,W
                 #         'currency_id': record.currency_id.id,
                 #     })
             elif accrued_total_line and total == 0:
@@ -145,6 +213,167 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
                 accrued_total_line.unlink()
 
 
+    def sync_new_records_for_accrual(self):
+        ce_records = self.env['sale.order'].search([
+            ('state', '=', 'sale'), 
+            ('x_studio_ce_status', 'in', ['Signed', 'Billable'])
+        ])
+        
+        total_success = 0
+        
+        for ce in ce_records:
+            state = ce.action_create_custom_accrued_revenue()
+            if state:
+                total_success += 1
+        
+        # Simply return the count
+        return total_success
+
+    
+    def create_entries(self):
+        """Create accrual journal entries and their automatic reversals"""
+        self.ensure_one()
+        
+        # Validation checks
+        if self.state != 'new':
+            raise UserError(_('Entries can only be created for records in "New" status.'))
+            
+        if self.reversal_date <= self.date:
+            raise UserError(_('Reversal date must be posterior to date.'))
+            
+        if not self.line_ids:
+            raise UserError(_('Cannot create entries without any revenue lines.'))
+            
+        if not self.journal_id:
+            raise UserError(_('Please specify a journal for the accrual entries.'))
+        
+        # Prepare move values
+        move_vals = self._prepare_move_vals()
+        
+        # Create and post the accrual move
+        move = self.env['account.move'].create(move_vals)
+        move._post()
+        self.related_accrued_entry = move.id
+        
+        # Create automatic reversal
+        reverse_move = move._reverse_moves(default_values_list=[{
+            'ref': _('Reversal of: %s', move.ref),
+            'name': '/',
+            'date': self.reversal_date,
+            'related_custom_accrued_record': self.id
+        }])
+        reverse_move._post()
+        self.related_reverse_accrued_entry = reverse_move.id
+        # Update state
+        self.state = 'accrued'
+        
+        # Post message to related sale order
+        if self.related_ce_id:
+            body = _(
+                'Accrual entry created on %(date)s: %(accrual_entry)s. '
+                'And its reverse entry: %(reverse_entry)s.',
+                date=self.date,
+                accrual_entry=move._get_html_link(),
+                reverse_entry=reverse_move._get_html_link(),
+            )
+            self.related_ce_id.message_post(body=body)
+        
+        return {
+            'name': _('Accrual Moves'),
+            'type': 'ir.actions.act_window',
+            'res_model': 'account.move',
+            'view_mode': 'list,form',
+            'domain': [('id', 'in', (move.id, reverse_move.id))],
+        }
+    
+    def _prepare_move_vals(self):
+        """Prepare the accounting move values from the accrued revenue lines"""
+        self.ensure_one()
+        
+        # Filter out zero amount lines
+        valid_lines = self.line_ids.filtered(lambda l: l.credit != 0 or l.debit != 0)
+        
+        if not valid_lines:
+            raise UserError(_('No valid lines found to create journal entries.'))
+        
+        # Prepare move line values
+        move_line_vals = []
+        
+        for line in valid_lines:
+            if not line.account_id:
+                raise UserError(_('Account is required for line: %s') % line.label)
+            
+            # Determine currency for move line - use line currency or fallback to record/company currency
+            line_currency_id = line.currency_id.id if line.currency_id else (self.currency_id.id if self.currency_id else self.company_id.currency_id.id)
+            move_line_vals.append({
+                'name': line.label,
+                'account_id': line.account_id.id,
+                'debit': line.debit,
+                'credit': line.credit,
+                'partner_id': self.ce_partner_id.id if self.ce_partner_id else False,
+                'currency_id': line_currency_id,
+            })
+        
+        # Determine currency for the move
+        move_currency_id = False
+        if self.currency_id:
+            move_currency_id = self.currency_id.id
+        else:
+            move_currency_id = self.company_id.currency_id.id
+        
+        # Prepare the move values
+        move_vals = {
+            'ref': f'Accrual - {self.related_ce_id.name if self.related_ce_id else self.display_name}',
+            'journal_id': self.journal_id.id,
+            'date': self.date,
+            'company_id': self.company_id.id,
+            'currency_id': move_currency_id,
+            'line_ids': [(0, 0, line_vals) for line_vals in move_line_vals],
+            'related_custom_accrued_record': self.id
+        }
+        
+        return move_vals
+    
+    def reverse_entries(self):
+        """Manual reversal of accrued entries"""
+        self.ensure_one()
+        
+        if self.state != 'accrued':
+            raise UserError(_('Only accrued entries can be reversed.'))
+        
+        # Find the original accrual move
+        domain = [
+            ('ref', 'like', f'Accrual - {self.related_ce_id.name if self.related_ce_id else self.display_name}'),
+            ('journal_id', '=', self.journal_id.id),
+            ('date', '=', self.date),
+            ('state', '=', 'posted'),
+        ]
+        
+        original_moves = self.env['account.move'].search(domain)
+        
+        if not original_moves:
+            raise UserError(_('No posted accrual entries found to reverse.'))
+        
+        # Update state
+        self.state = 'reversed'
+        
+        return {
+            'name': _('Accrual Entries'),
+            'type': 'ir.actions.act_window',
+            'res_model': 'account.move',
+            'view_mode': 'list,form',
+            'domain': [('id', 'in', original_moves.ids)],
+        }
+
+    def action_open_journal_entries(self):
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'name': 'Journal Entries',
+            'res_model': 'account.move',
+            'view_mode': 'list,form',
+            'domain': [('related_custom_accrued_record', '=', self.id)],
+        }
 
 class SaatchiCustomizedAccruedRevenueLines(models.Model):
     _name = 'saatchi.accrued_revenue_lines'
@@ -159,31 +388,35 @@ class SaatchiCustomizedAccruedRevenueLines(models.Model):
         'saatchi.accrued_revenue',
         string="Accrued Revenue",
         ondelete='cascade',
-        required=True
+        required=True,
+        readonly=True
     )
 
-    ce_line_id = fields.Many2one('sale.order.line', string="Sale Order Line", ondelete='cascade')
+    ce_line_id = fields.Many2one('sale.order.line', string="Sale Order Line", ondelete='cascade',readonly=True)
 
     account_id = fields.Many2one(
         'account.account',
         string="Account",
-        domain=[('deprecated', '=', False)]
+        domain=[('deprecated', '=', False)],
+        readonly=True
     )
 
     label = fields.Char(
         string="Label",
-        required=True
+        required=True,
+        readonly=True
     )
 
-    debit = fields.Monetary(
+    debit = fields.Float(
         string="Debit",
-        currency_field='currency_id',
-        default=0.0
+        # currency_field='currency_id',
+        default=0.0,
+        readonly=True
     )
 
-    credit = fields.Monetary(
+    credit = fields.Float(
         string="Credit",
-        currency_field='currency_id',
+        # currency_field='currency_id',
         default=0.0
     )
 
@@ -216,6 +449,12 @@ class SaatchiCustomizedAccruedRevenueLines(models.Model):
             for line in self:
                 if line.accrued_revenue_id:
                     line.accrued_revenue_id.update_total_accrued_line()
+                if line.label == 'Total Accrued':
+                    raise UserError("You cannot set credit amount on this line!")
+
+        
+
+        
                     
         return result
     
@@ -226,43 +465,5 @@ class SaatchiCustomizedAccruedRevenueLines(models.Model):
             revenue.update_total_accrued_line()
         return result
 
-class SaleOrder(models.Model):
-    _inherit="sale.order"
 
-    def action_create_custom_accrued_revenue(self):
-        """Create a new accrued revenue entry for this sale order"""
-        
-        # Create the accrued revenue record
-        accrued_revenue = self.env['saatchi.accrued_revenue'].create({
-            'related_ce_id': self.id,
-            'currency_id': self.currency_id.id,
-        })
-        
-        # Create lines for each sale order line
-        total_eligible_for_accrue = 0
-        for line in self.order_line:
-            self.env['saatchi.accrued_revenue_lines'].create({
-                'accrued_revenue_id': accrued_revenue.id,
-                'ce_line_id': line.id,
-                'account_id': line.product_id.property_account_income_id.id or line.product_id.categ_id.property_account_income_categ_id.id,
-                'label': line.name or 'Accrued Revenue Line',
-                'credit': line.price_subtotal, 'currency_id': line.currency_id.id
-            })
-            total_eligible_for_accrue += line.price_subtotal
-
-            
-        self.env['saatchi.accrued_revenue_lines'].create(
-                {'accrued_revenue_id': accrued_revenue.id,
-                 'label': 'Total Accrued', 'currency_id': self.currency_id.id})
-
-        accrued_revenue.write({'ce_original_total_amount': total_eligible_for_accrue})
-        # Return action to open the created record
-        return {
-            'type': 'ir.actions.act_window',
-            'name': 'Accrued Revenue',
-            'res_model': 'saatchi.accrued_revenue',
-            'res_id': accrued_revenue.id,
-            'view_mode': 'form',
-            'target': 'current',
-        }
         

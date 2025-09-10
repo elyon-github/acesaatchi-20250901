@@ -24,11 +24,18 @@ Long description of module's purpose
     'data': [
         'security/ir.model.access.csv',
         'views/views.xml',
-        'views/templates.xml',
+        'views/inherited_views.xml',
     ],
     # only loaded in demonstration mode
     'demo': [
         'demo/demo.xml',
     ],
+
+    'assets': {
+        'web.assets_backend': [
+            'saatchi_customized_accrued_revenue/static/src/js/sync_js_button.js',
+            'saatchi_customized_accrued_revenue/static/src/xml/sync_js_button.xml',
+        ]
+    }
 }
 

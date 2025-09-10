@@ -19,11 +19,20 @@
         <field name="name">saatchi.accrued_revenue.list</field>
         <field name="model">saatchi.accrued_revenue</field>
         <field name="arch" type="xml">
-            <list string="Accrued Revenues">
+
+            <list string="Accrued Revenues" js_class="button_in_list">
+                <header>
+                    <button string="Sync / Create Draft Subject for Accrual CE" name="sync_new_records_for_accrual" type="object"/>
+                </header>
                 <field name="related_ce_id"/>
                 <field name="ce_partner_id"  widget="res_partner_many2one"/>
                 <field name="ce_status"/>
                 <field name="ce_job_description"/>
+                <field name="state" widget="badge" 
+                    decoration-info="state == 'new'"
+                    decoration-success="state == 'accrued'"
+                    decoration-warning="state == 'reversed'"
+                    decoration-danger="state == 'cancel'"/>
             </list>
         </field>
     </record>
@@ -34,7 +43,27 @@
         <field name="model">saatchi.accrued_revenue</field>
         <field name="arch" type="xml">
             <form string="Accrued Revenue">
+            <header>
+                <button name="create_entries"
+                        type="object"
+                        string="Create Entry"
+                        class="btn-primary"/>
+                <field name="state" widget="statusbar"
+                       statusbar_visible="new,accrued,reversed"
+                       statusbar_colors="{'new': 'blue', 'accrued': 'green', 'reversed': 'green', 'cancel': 'green'}"/>
+            </header>
                 <sheet>
+                <div class="oe_button_box" name="button_box">
+                    <!-- Journal Entries -->
+                    <button name="action_open_journal_entries"
+                            type="object"
+                            class="oe_stat_button"
+                            icon="fa-book">
+                        <div class="o_stat_info">
+                            <span class="o_stat_text">Journal Entries</span>
+                        </div>
+                    </button>
+                </div>
                     <group>
 
                          <group>
@@ -42,6 +71,10 @@
                             <field name="ce_partner_id"/>
                             <field name="ce_status"/>
                             <field name="ce_job_description"/>
+                            <field name="currency_id" invisible="1"/>
+                            <field name="ce_original_total_amount" widget="monetary" options="{'currency_field': 'currency_id'}" readonly="1"/>
+                             <field name="related_accrued_entry"/>
+                             <field name="related_reverse_accrued_entry"/>
                         </group>
                          <group>
                             <field name="journal_id"/>
@@ -55,13 +88,13 @@
                         <notebook>
                             <page string="Accrued Lines">
                                 <field name="line_ids">
-                                    <list editable="bottom">
+                                    <list editable="bottom" create="0">
                                         <field name="sequence" widget="handle"/>
                                         <field name="account_id"/>
                                         <field name="ce_line_id"/>
                                         <field name="label"/>
-                                        <field name="debit"/>
-                                        <field name="credit"/>
+                                        <field name="debit" sum="Total Debit"/>
+                                        <field name="credit" sum="Total Credit"/>
                                     </list>
                                 </field>
                             </page>
@@ -69,6 +102,7 @@
 
                     </group>
                 </sheet>
+                <chatter/>
             </form>
         </field>
     </record>
