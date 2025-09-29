@@ -9,9 +9,9 @@
 
     <!-- Menu item under Sales Orders -->
     <menuitem id="menu_saatchi_customized_accrued_revenue"
-              name="Accrued Revenues"
-              parent="sale.menu_sale_order"
-              sequence="3"
+              name="Accrued Revenue"
+              parent="sale.sale_order_menu"
+              sequence="25"
               action="action_saatchi_customized_accrued_revenue"/>
 
     <!-- List view -->
@@ -22,14 +22,15 @@
 
             <list string="Accrued Revenues" js_class="button_in_list">
                 <header>
-                    <button string="Sync / Create Draft Subject for Accrual CE" name="sync_new_records_for_accrual" type="object"/>
+                    <button string="Create Entries" name="create_multiple_entries" type="object"/>
                 </header>
                 <field name="related_ce_id"/>
+                <field name="ce_code"/>
                 <field name="ce_partner_id"  widget="res_partner_many2one"/>
                 <field name="ce_status"/>
                 <field name="ce_job_description"/>
                 <field name="state" widget="badge" 
-                    decoration-info="state == 'new'"
+                    decoration-info="state == 'draft'"
                     decoration-success="state == 'accrued'"
                     decoration-warning="state == 'reversed'"
                     decoration-danger="state == 'cancel'"/>
@@ -47,10 +48,12 @@
                 <button name="create_entries"
                         type="object"
                         string="Create Entry"
-                        class="btn-primary"/>
+                        class="btn-primary"
+                        invisible="state != 'draft'"
+                    />
                 <field name="state" widget="statusbar"
-                       statusbar_visible="new,accrued,reversed"
-                       statusbar_colors="{'new': 'blue', 'accrued': 'green', 'reversed': 'green', 'cancel': 'green'}"/>
+                       statusbar_visible="draft,accrued,reversed"
+                       statusbar_colors="{'draft': 'blue', 'accrued': 'green', 'reversed': 'green', 'cancel': 'green'}"/>
             </header>
                 <sheet>
                 <div class="oe_button_box" name="button_box">
@@ -69,12 +72,13 @@
                          <group>
                             <field name="related_ce_id"/>
                             <field name="ce_partner_id"/>
+                            <field name="ce_code"/>
                             <field name="ce_status"/>
                             <field name="ce_job_description"/>
                             <field name="currency_id" invisible="1"/>
+                            <field name="related_accrued_entry" invisible="not related_accrued_entry"/>
+                            <field name="related_reverse_accrued_entry" invisible="not related_reverse_accrued_entry"/>
                             <field name="ce_original_total_amount" widget="monetary" options="{'currency_field': 'currency_id'}" readonly="1"/>
-                             <field name="related_accrued_entry"/>
-                             <field name="related_reverse_accrued_entry"/>
                         </group>
                          <group>
                             <field name="journal_id"/>
@@ -92,6 +96,7 @@
                                         <field name="sequence" widget="handle"/>
                                         <field name="account_id"/>
                                         <field name="ce_line_id"/>
+                                        <field name="analytic_distribution" widget="analytic_distribution" readonly="1"/>
                                         <field name="label"/>
                                         <field name="debit" sum="Total Debit"/>
                                         <field name="credit" sum="Total Credit"/>

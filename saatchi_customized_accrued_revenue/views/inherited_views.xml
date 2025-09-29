@@ -10,6 +10,41 @@
                 </xpath>
             </field>
         </record>
+        <record id="view_move_form_inherit_custom" model="ir.ui.view">
+            <field name="name">account.move.form.inherit.custom</field>
+            <field name="model">account.move</field>
+            <field name="inherit_id" ref="account.view_move_form"/>
+            <field name="arch" type="xml">
+                <xpath expr="//field[@name='amount_residual']" position="after">
+                    <field name="sub_currency_id" options="{'no_open':true}"/>
+                    <field name="custom_exchange_rate" widget="monetary" options="{'currency_field': 'sub_currency_id'}"/>
+                </xpath>
+            </field>
+        </record>
+
+
+    <record id="view_sale_order_form_inherit_custom" model="ir.ui.view">
+        <field name="name">sale.order.form.inherit.custom</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <!-- Add after the 'amount_total' field on the SO form -->
+            <xpath expr="//field[@name='tax_totals']" position="after">
+                <div class="o_sale_total">
+                    <span class="o_form_label">Foreign Currency:</span>
+                    <field name="sub_currency_id" options="{'no_open': true}" class="oe_inline"/>
+                </div>
+                <div class="o_sale_total">
+                    <span class="o_form_label">Foreign Exchange Rate:</span>
+                    <field name="custom_exchange_rate"
+                           widget="monetary"
+                           options="{'currency_field': 'sub_currency_id'}"
+                           class="oe_inline"/>
+                </div>
+            </xpath>
+
+        </field>
+    </record>
 
     </data>
 </odoo>
