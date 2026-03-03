@@ -81,10 +81,17 @@ class SaleOrder(models.Model):
         client_sig_so_ids = set()
 
         # ── Standard: signed/billable SOs ──
+        # Only include SOs whose effective date <= accrual_date.
+        # Use x_studio_old_ce_date if set, otherwise fall back to date_order.
+        # When no x_studio_old_ce_date, also check create_date <= accrual_date.
         eligible_sos = self.search([
             ('state', '=', 'sale'),
             ('x_ce_status', 'in', ['signed', 'billable']),
-            ('x_ce_code', '!=', False)
+            ('x_ce_code', '!=', False),
+            '|',
+                '&', ('x_studio_old_ce_date', '!=', False), ('x_studio_old_ce_date', '<=', accrual_date),
+                '&', ('x_studio_old_ce_date', '=', False), 
+                     '&', ('date_order', '<=', accrual_date), ('create_date', '<=', accrual_date),
         ])
 
         for so in eligible_sos:
@@ -104,7 +111,11 @@ class SaleOrder(models.Model):
         client_sig_sos = self.search([
             ('state', '=', 'sale'),
             ('x_ce_status', '=', 'for_client_signature'),
-            ('x_ce_code', '!=', False)
+            ('x_ce_code', '!=', False),
+            '|',
+                '&', ('x_studio_old_ce_date', '!=', False), ('x_studio_old_ce_date', '<=', accrual_date),
+                '&', ('x_studio_old_ce_date', '=', False), 
+                     '&', ('date_order', '<=', accrual_date), ('create_date', '<=', accrual_date),
         ])
 
         if client_sig_sos:
@@ -238,12 +249,21 @@ class SaleOrder(models.Model):
 
     # ========== Accrual Creation Methods ==========
 
-    def _calculate_accrual_amount(self):
+    def _calculate_accrual_amount(self, accrual_date=None):
         """
         Calculate total accrual amount for this sale order
 
         Only processes Agency Charges category lines that have:
         - Delivered but not invoiced quantity (accrued_qty > 0)
+
+        If accrual_date is provided, only counts invoices with
+        invoice_date <= accrual_date (posted, non-cancelled).
+        This ensures accurate historical accrual
+        (e.g., Jan accrual won't be affected by Feb invoices).
+
+        Args:
+            accrual_date: Optional date to filter invoices by.
+                         If None, uses current qty_invoiced (backwards compatible).
 
         Returns:
             float: Total accrual amount
@@ -258,7 +278,26 @@ class SaleOrder(models.Model):
             if not self._is_agency_charges_category(line.product_template_id):
                 continue
 
-            accrued_qty = line.product_uom_qty - line.qty_invoiced
+            if accrual_date:
+                # Manually compute qty_invoiced considering only invoices
+                # with invoice_date <= accrual_date (mirrors Odoo's _compute_qty_invoiced)
+                qty_invoiced = 0.0
+                for inv_line in line.invoice_lines:
+                    move = inv_line.move_id
+                    if move.state == 'cancel' and move.payment_state != 'invoicing_legacy':
+                        continue
+                    if not move.invoice_date or move.invoice_date > accrual_date:
+                        continue
+                    if move.move_type == 'out_invoice':
+                        qty_invoiced += inv_line.product_uom_id._compute_quantity(
+                            inv_line.quantity, line.product_uom, round=False)
+                    elif move.move_type == 'out_refund':
+                        qty_invoiced -= inv_line.product_uom_id._compute_quantity(
+                            inv_line.quantity, line.product_uom, round=False)
+                accrued_qty = line.product_uom_qty - qty_invoiced
+            else:
+                accrued_qty = line.product_uom_qty - line.qty_invoiced
+
             if accrued_qty <= 0:
                 continue
 
@@ -345,6 +384,9 @@ class SaleOrder(models.Model):
         
         # Get the target company from accrued_revenue
         target_company = accrued_revenue.company_id
+
+        # Use accrual date to filter invoices for accurate qty_invoiced
+        accrual_date = accrued_revenue.date
         
         for line in self.order_line:
             if line.display_type:
@@ -354,9 +396,27 @@ class SaleOrder(models.Model):
                 _logger.debug(f"Skipping line {line.name} - not Agency Charges category")
                 continue
             
-            accrued_qty = line.product_uom_qty - line.qty_invoiced
+            # Compute qty_invoiced filtered by accrual date
+            if accrual_date:
+                qty_invoiced = 0.0
+                for inv_line in line.invoice_lines:
+                    move = inv_line.move_id
+                    if move.state == 'cancel' and move.payment_state != 'invoicing_legacy':
+                        continue
+                    if not move.invoice_date or move.invoice_date > accrual_date:
+                        continue
+                    if move.move_type == 'out_invoice':
+                        qty_invoiced += inv_line.product_uom_id._compute_quantity(
+                            inv_line.quantity, line.product_uom, round=False)
+                    elif move.move_type == 'out_refund':
+                        qty_invoiced -= inv_line.product_uom_id._compute_quantity(
+                            inv_line.quantity, line.product_uom, round=False)
+            else:
+                qty_invoiced = line.qty_invoiced
+
+            accrued_qty = line.product_uom_qty - qty_invoiced
             if accrued_qty == 0:  # Changed from <= to == to allow negative
-                _logger.debug(f"Skipping line {line.name} - no accrued qty (qty: {line.product_uom_qty}, invoiced: {line.qty_invoiced})")
+                _logger.debug(f"Skipping line {line.name} - no accrued qty (qty: {line.product_uom_qty}, invoiced: {qty_invoiced})")
                 continue
             
             accrued_amount = accrued_qty * line.price_unit
@@ -478,7 +538,8 @@ class SaleOrder(models.Model):
             int: Accrual record ID if successful, False otherwise
         """
         # Calculate total accrual amount as default suggestion
-        total_accrual_amount = self._calculate_accrual_amount()
+        # Use accrual date from the record to filter invoices by date
+        total_accrual_amount = self._calculate_accrual_amount(accrual_date=accrued_revenue.date)
 
         if total_accrual_amount <= 0:
             # Still create the entry but with 0 amount (user will fill in manually)

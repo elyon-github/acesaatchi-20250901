@@ -815,19 +815,19 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
         })
         
         for so in potential_sos:
-            amount_total = so._calculate_accrual_amount()
-            
-            if amount_total:
-                has_duplicate = so in duplicate_sos
-                is_client_sig = so.id in client_sig_so_ids
-                self.env['saatchi.accrued_revenue.wizard.line'].create({
-                    'wizard_id': wizard.id,
-                    'sale_order_id': so.id,
-                    'has_existing_accrual': has_duplicate,
-                    'amount_total': amount_total,
-                    'create_accrual': not has_duplicate,
-                    'is_from_reversal_ob': is_client_sig,
-                })
+            amount_total = so._calculate_accrual_amount(accrual_date=accrual_date)
+            if not amount_total:
+                continue
+            has_duplicate = so in duplicate_sos
+            is_client_sig = so.id in client_sig_so_ids
+            self.env['saatchi.accrued_revenue.wizard.line'].create({
+                'wizard_id': wizard.id,
+                'sale_order_id': so.id,
+                'has_existing_accrual': has_duplicate,
+                'amount_total': amount_total,
+                'create_accrual': not has_duplicate,
+                'is_from_reversal_ob': is_client_sig,
+            })
         
         wizard_name = _('Generate Accrued Revenues - Duplicates Found') if duplicate_sos else _('Generate Accrued Revenues')
         

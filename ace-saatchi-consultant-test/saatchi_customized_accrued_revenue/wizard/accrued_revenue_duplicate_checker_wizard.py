@@ -90,9 +90,6 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
             if record.accrual_date:
                 record.reversal_date = record.accrual_date + \
                     relativedelta(months=1, day=1)
-                # Re-collect potential accruals when date changes
-                if not record.special_case_mode:
-                    record._refresh_so_lines()
 
     # ========== Compute Methods ==========
 
@@ -106,40 +103,53 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
 
     # ========== Default Methods ==========
 
-    def _refresh_so_lines(self):
+    def action_refresh_so_lines(self):
         """
-        Re-collect potential accruals and rebuild wizard lines.
-        Called when accrual_date changes so for_client_signature SOs
-        from reversal OB appear/disappear based on the cutoff date.
+        Button action: Re-collect potential accruals and rebuild wizard lines.
+        Uses direct DB operations (unlink + create) to avoid onchange/One2many conflicts.
+        Returns an action to reload the wizard form.
         """
         self.ensure_one()
         if not self.accrual_date or not self.reversal_date:
             return
+
+        # Update reversal_date based on new accrual_date
+        self.reversal_date = self.accrual_date + relativedelta(months=1, day=1)
 
         potential_sos, duplicate_sos, client_sig_so_ids = self.env['sale.order'].collect_potential_accruals(
             accrual_date=self.accrual_date,
             reversal_date=self.reversal_date
         )
 
-        # Build new lines list
-        new_lines = []
-        # Clear existing lines
-        new_lines.append((5, 0, 0))
+        # Delete existing lines from DB
+        self.so_line_ids.unlink()
 
+        # Create new lines directly in DB
         for so in potential_sos:
-            amount_total = so._calculate_accrual_amount()
-            if amount_total:
-                has_duplicate = so in duplicate_sos
-                is_client_sig = so.id in client_sig_so_ids
-                new_lines.append((0, 0, {
-                    'sale_order_id': so.id,
-                    'has_existing_accrual': has_duplicate,
-                    'amount_total': amount_total,
-                    'create_accrual': not has_duplicate,
-                    'is_from_reversal_ob': is_client_sig,
-                }))
+            amount_total = so._calculate_accrual_amount(accrual_date=self.accrual_date)
+            if not amount_total:
+                continue
+            has_duplicate = so in duplicate_sos
+            is_client_sig = so.id in client_sig_so_ids
+            self.env['saatchi.accrued_revenue.wizard.line'].create({
+                'wizard_id': self.id,
+                'sale_order_id': so.id,
+                'has_existing_accrual': has_duplicate,
+                'amount_total': amount_total,
+                'create_accrual': not has_duplicate,
+                'is_from_reversal_ob': is_client_sig,
+            })
 
-        self.so_line_ids = new_lines
+        # Reload the wizard form to reflect changes
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'saatchi.accrued_revenue.wizard',
+            'view_mode': 'form',
+            'res_id': self.id,
+            'views': [(False, 'form')],
+            'target': 'new',
+            'context': self.env.context,
+        }
 
     def _default_accrual_date(self):
         """Default to last day of previous month"""

@@ -41,6 +41,12 @@
                             <field name="reversal_date" 
                                    help="First day of the next period for auto-reversal"
                                    invisible="accrual_scenario == 'scenario_3'"/>
+                            <button name="action_refresh_so_lines" 
+                                    string="🔄 Refresh Sale Orders" 
+                                    type="object" 
+                                    class="btn-secondary mt-2"
+                                    invisible="special_case_mode"
+                                    help="Reload sale orders based on the selected accrual date"/>
                         </group>
                         <group>
                             <!-- Special Case Mode (hidden, controlled by context) -->

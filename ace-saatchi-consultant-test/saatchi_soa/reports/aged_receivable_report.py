@@ -265,8 +265,8 @@ class AgedReceivablesXLSX(models.AbstractModel):
         sheet.write(row, 2, 'CLIENT', formats['yellow_header'])
         sheet.write(row, 3, 'INVOICE #', formats['yellow_header'])
         sheet.write(row, 4, 'DATE', formats['yellow_header'])
-        sheet.write(row, 5, 'FOREIGN AMOUNT', formats['yellow_header'])
-        sheet.write(row, 6, 'AMOUNT', formats['yellow_header'])
+        sheet.write(row, 5, 'AMOUNT', formats['yellow_header'])
+        sheet.write(row, 6, 'FOREIGN AMOUNT', formats['yellow_header'])
         
         for i, label in enumerate(aging_labels):
             sheet.write(row, 7 + i, label, formats['yellow_header'])
@@ -364,6 +364,8 @@ class AgedReceivablesXLSX(models.AbstractModel):
                 # sheet.write(row, 4, ce_date, formats['date'])  # DATE
                 sheet.write(row, 4, inv_date, formats['date'])  # DATE - change to actual invoice date
                 
+                sheet.write(row, 5, amount, currency_format)  # AMOUNT (in PHP)
+                
                 # Write foreign amount (only if not PHP)
                 if foreign_amount is not None:
                     # Get currency symbol from the invoice's currency
@@ -374,11 +376,9 @@ class AgedReceivablesXLSX(models.AbstractModel):
                         foreign_currency_formats[currency_symbol] = self._create_currency_format(
                             workbook, currency_symbol, base_font)
                     
-                    sheet.write(row, 5, foreign_amount, foreign_currency_formats[currency_symbol])  # FOREIGN AMOUNT
+                    sheet.write(row, 6, foreign_amount, foreign_currency_formats[currency_symbol])  # FOREIGN AMOUNT
                 else:
-                    sheet.write(row, 5, '-', formats['right_aligned'])  # FOREIGN AMOUNT (dash if PHP)
-                
-                sheet.write(row, 6, amount, currency_format)  # AMOUNT (in PHP)
+                    sheet.write(row, 6, '-', formats['right_aligned'])  # FOREIGN AMOUNT (dash if PHP)
 
                 # Aging buckets - only populate the matching bucket
                 for i in range(5):
@@ -392,8 +392,8 @@ class AgedReceivablesXLSX(models.AbstractModel):
 
             # Write subtotal row for this partner
             sheet.merge_range(row, 0, row, 4, f'Total | {partner_name}', formats['subtotal_label'])
-            sheet.write(row, 5, '-', formats['subtotal_cell'])  # FOREIGN AMOUNT (dash)
-            sheet.write(row, 6, subtotals['total'], subtotal_currency_format)
+            sheet.write(row, 5, subtotals['total'], subtotal_currency_format)
+            sheet.write(row, 6, '-', formats['subtotal_cell'])  # FOREIGN AMOUNT (dash)
 
             for i in range(5):
                 sheet.write(row, 7 + i, subtotals['buckets'][i], subtotal_currency_format)
@@ -408,8 +408,8 @@ class AgedReceivablesXLSX(models.AbstractModel):
         sheet.write(row, 2, '', formats['grand_total'])
         sheet.write(row, 3, '', formats['grand_total'])
         sheet.write(row, 4, '', formats['grand_total'])
-        sheet.write(row, 5, '-', formats['grand_total'])  # FOREIGN AMOUNT (dash)
-        sheet.write(row, 6, grand_totals['total'], grand_total_currency_format)
+        sheet.write(row, 5, grand_totals['total'], grand_total_currency_format)
+        sheet.write(row, 6, '-', formats['grand_total'])  # FOREIGN AMOUNT (dash)
 
         for i in range(5):
             sheet.write(row, 7 + i, grand_totals['buckets'][i], grand_total_currency_format)
