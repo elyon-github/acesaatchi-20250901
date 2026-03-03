@@ -41,12 +41,6 @@
                             <field name="reversal_date" 
                                    help="First day of the next period for auto-reversal"
                                    invisible="accrual_scenario == 'scenario_3'"/>
-                            <button name="action_refresh_so_lines" 
-                                    string="🔄 Refresh Sale Orders" 
-                                    type="object" 
-                                    class="btn-secondary mt-2"
-                                    invisible="special_case_mode"
-                                    help="Reload sale orders based on the selected accrual date"/>
                         </group>
                         <group>
                             <!-- Special Case Mode (hidden, controlled by context) -->
@@ -59,6 +53,21 @@
                                    required="special_case_mode"/>
                         </group>
                     </group>
+                    
+                    <!-- Refresh Sale Orders Banner and Button -->
+                    <div class="alert alert-danger mt-3" 
+                         role="alert"
+                         invisible="special_case_mode">
+                        <i class="fa fa-exclamation-triangle"/> 
+                        <strong>⚠️ IMPORTANT:</strong> After changing the accrual date, you MUST click the "Refresh Sale Orders" button below to update the list. Without refreshing, the sale orders will not match your selected period.
+                    </div>
+                    <div class="text-center mt-3" invisible="special_case_mode">
+                        <button name="action_refresh_so_lines" 
+                                string="🔄 Refresh Sale Orders" 
+                                type="object" 
+                                class="btn btn-primary w-50"
+                                help="Reload sale orders based on the selected accrual date"/>
+                    </div>
                     
                     <!-- Scenario Explanation Banner -->
                     <div class="alert alert-info" 
