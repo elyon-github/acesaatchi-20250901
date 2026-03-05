@@ -301,11 +301,21 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         if not reversal_ob_records:
             return
 
-        # Collect normalized CE codes already present
+        # Collect normalized CE codes already present.
+        # Also include normalized x_studio_old_ce from matching sale orders so
+        # that OB rows keyed by the old CE code (e.g. "BLF 00004") are
+        # recognised as duplicates of existing SO rows (e.g. BLFSO000211
+        # whose x_studio_old_ce == "BLF 00004").
         existing_normalized_ces = set()
         for partner_name, ces in grouped_data.items():
             for ce_code_key in ces.keys():
                 existing_normalized_ces.add(self._normalize_ce_code(ce_code_key))
+                # Look up SO by CE code and add its x_studio_old_ce
+                so = self._find_sale_order_by_ce_code(ce_code_key)
+                if so:
+                    old_ce = getattr(so, 'x_studio_old_ce', '') or ''
+                    if old_ce:
+                        existing_normalized_ces.add(self._normalize_ce_code(old_ce))
 
         # Add reversal-OB-only rows for CEs not already present
         for norm_ce, rob_data in reversal_ob_records.items():
@@ -511,6 +521,14 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             for so in all_billed_sos:
                 partner_name = so.partner_id.name.upper() if so.partner_id and so.partner_id.name else 'UNKNOWN'
                 ce_code = so.x_ce_code.upper() if so.x_ce_code else 'NO_CE'
+                
+                # If the SO has x_studio_old_ce that already exists as a key
+                # in grouped_data for this partner, merge into that row instead
+                # of creating a duplicate (e.g. SO "BLFSO000211" with
+                # x_studio_old_ce "BLF 00004" should merge into "BLF 00004").
+                old_ce = (getattr(so, 'x_studio_old_ce', '') or '').upper().strip()
+                if old_ce and partner_name in grouped and old_ce in grouped[partner_name]:
+                    ce_code = old_ce
                 
                 # Add SO to sales_orders set (will merge with existing if already present)
                 grouped[partner_name][ce_code]['sales_orders'].add(so.id)
@@ -940,9 +958,19 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             # Write BILLED amount
             sheet.write(row, 5, billed_amount, formats['currency_negative'])
 
-            # Apply reversal OB fallback for this CE
+            # Apply reversal OB fallback for this CE.
+            # Try the CE code first, then fall back to x_studio_old_ce
+            # from the matching sale order (e.g. SO "BLFSO000211" has
+            # x_studio_old_ce "BLF 00004" which matches the OB key).
             norm_ce = self._normalize_ce_code(ce_code)
             rev_ob = reversal_ob_balances.get(norm_ce, {})
+            if not rev_ob:
+                so_match = self._find_sale_order_by_ce_code(ce_code)
+                if so_match:
+                    old_ce = getattr(so_match, 'x_studio_old_ce', '') or ''
+                    if old_ce:
+                        rev_ob = reversal_ob_balances.get(
+                            self._normalize_ce_code(old_ce), {})
 
             system_reversal_val = amounts['system_reversal']
             if system_reversal_val == 0 and rev_ob.get('system_reversal', 0) != 0:
