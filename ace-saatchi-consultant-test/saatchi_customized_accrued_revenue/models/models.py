@@ -87,6 +87,19 @@ class SaatchiAccrualConfig(models.Model):
              'the Dec 31 balance column will use imported opening balances.'
     )
 
+    excluded_billed_account_ids = fields.Many2many(
+        'account.account',
+        'saatchi_accrual_config_excluded_account_rel',
+        'config_id',
+        'account_id',
+        string='Excluded Billed Accounts',
+        domain="[('deprecated', '=', False)]",
+        help='Accounts to exclude from the Billed amount calculation in reports. '
+             'When computing billed amounts, journal items posted to these accounts '
+             'will have their credit subtracted from the invoice untaxed total. '
+             'Typical examples: Unbilled WIP, Retail Income, Cost of Revenue accounts.'
+    )
+
     @api.constrains('accrued_journal_id')
     def _check_journal_company(self):
         """Ensure journal belongs to the configured company"""

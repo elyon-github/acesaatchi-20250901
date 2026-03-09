@@ -19,6 +19,11 @@
                             <field name="opening_balance_cutoff_date"
                                    help="Set the month-end date for which opening balances apply. Example: 2025-12-31 means the January 2026 report will use opening balances for Dec 31 balance column."/>
                         </group>
+                        <group string="Billed Amount Excluded Accounts">
+                            <field name="excluded_billed_account_ids" widget="many2many_tags"
+                                   domain="[('company_ids', 'in', company_id), ('deprecated', '=', False)]"
+                                   help="Accounts whose journal item credits will be subtracted from the billed (untaxed) amount in reports. E.g. Unbilled WIP, Retail Income, Cost of Revenue."/>
+                        </group>
                     </sheet>
                 </form>
             </field>

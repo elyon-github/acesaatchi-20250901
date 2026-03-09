@@ -591,42 +591,76 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         return amounts
 
+    def _get_excluded_billed_account_ids(self):
+        """Get the set of account IDs to exclude from billed amount calculation.
+
+        Reads from the saatchi.accrual_config Many2many field
+        'excluded_billed_account_ids' for the current company.
+        """
+        try:
+            config = self.env['saatchi.accrual_config'].sudo().search([
+                ('company_id', '=', self.env.company.id)
+            ], limit=1)
+            if config and config.excluded_billed_account_ids:
+                return set(config.excluded_billed_account_ids.ids)
+        except Exception as e:
+            _logger.warning('Could not retrieve excluded billed accounts: %s', str(e))
+        return set()
+
     def _calculate_billed_amount(self, sales_order_ids, report_month):
-        """Calculate total billed amount for given sales orders in the report month
-        
+        """Calculate total billed amount for given sales orders in the report month.
+
+        Formula:
+            billed = sum(invoice.amount_untaxed)
+                   - sum(credit of invoice journal items whose account is in
+                         the excluded accounts configured in Accrual Configuration).
+
+        Only invoices with x_studio_invoice_type == 'CE Related' are included.
+
         Args:
             sales_order_ids: set of sale.order IDs
             report_month: date object representing the report month
-            
+
         Returns:
-            float: Total billed amount (untaxed) for posted invoices in the report month
+            float: Adjusted billed amount for posted invoices in the report month
         """
         if not sales_order_ids:
             return 0.0
-        
+
         # Get the start and end of the report month
         month_start = report_month.replace(day=1)
         month_end = (month_start + relativedelta(months=1)) - relativedelta(days=1)
-        
+
+        # Get excluded account IDs from accrual configuration
+        excluded_account_ids = self._get_excluded_billed_account_ids()
+
         total_billed = 0.0
-        
+        total_exclusion = 0.0
+
         # Browse sales orders
         sales_orders = self.env['sale.order'].browse(list(sales_order_ids))
-        
+
         for so in sales_orders:
             # Get all invoices related to this sales order
             invoices = so.invoice_ids.filtered(
-                lambda inv: inv.state == 'posted' 
+                lambda inv: inv.state == 'posted'
                 and inv.move_type == 'out_invoice'
-                and inv.invoice_date 
+                and inv.invoice_date
                 and month_start <= inv.invoice_date <= month_end
+                and getattr(inv, 'x_studio_invoice_type', '') == 'CE Related'
             )
-            
-            # Sum the untaxed amounts (use amount_untaxed instead of amount_total)
+
             for invoice in invoices:
+                # Start with the untaxed amount
                 total_billed += invoice.amount_untaxed
-        
-        return total_billed
+
+                # Subtract credits of journal items on excluded accounts
+                if excluded_account_ids:
+                    for line in invoice.line_ids:
+                        if line.account_id and line.account_id.id in excluded_account_ids:
+                            total_exclusion += (line.credit or 0.0)
+
+        return total_billed - total_exclusion
 
     def generate_xlsx_report(self, workbook, data, docids):
         """
@@ -890,7 +924,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # Format month names
         month_full = report_month.strftime('%B %Y').upper()
         report_date = report_month.strftime('%m/%d/%Y')
-        prev_month = (report_month - relativedelta(months=1)).strftime('%B').upper()
+        cost_to_client_month = report_month.strftime('%B').upper()
 
         # Set column widths
         sheet.set_column(0, 0, 15)   # CE#
@@ -927,7 +961,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             'CE#', 'CE DATE', 'DESCRIPTION', 'Year', 'Month', 'BILLED',
             'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
             'TOTAL', 'CE STATUS', 'PER CSD', 'VARIANCE',
-            f'COST TO CLIENT - {prev_month}', 'FOR REVENUE ADJUSTMENT', 'REMARKS'
+            f'COST TO CLIENT - {cost_to_client_month}', 'FOR REVENUE ADJUSTMENT', 'REMARKS'
         ]
 
         for col, header in enumerate(headers):
