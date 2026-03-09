@@ -756,9 +756,18 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             for ce_code, ce_data in ces_data.items():
                 amounts = self._calculate_amounts_by_type(ce_data['lines'], report_month)
                 
-                # Apply reversal OB fallback for this CE
+                # Apply reversal OB fallback for this CE.
+                # Try CE code first, then x_studio_old_ce from linked SO
+                # (e.g. SO "BLFSO000211" with x_studio_old_ce "BLF 00004").
                 norm_ce = self._normalize_ce_code(ce_code)
                 rev_ob = reversal_ob_balances.get(norm_ce, {})
+                if not rev_ob:
+                    so_match = self._find_sale_order_by_ce_code(ce_code)
+                    if so_match:
+                        old_ce = getattr(so_match, 'x_studio_old_ce', '') or ''
+                        if old_ce:
+                            rev_ob = reversal_ob_balances.get(
+                                self._normalize_ce_code(old_ce), {})
 
                 system_reversal_val = amounts['system_reversal']
                 if system_reversal_val == 0 and rev_ob.get('system_reversal', 0) != 0:
