@@ -611,11 +611,17 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         """Calculate total billed amount for given sales orders in the report month.
 
         Formula:
-            billed = sum(invoice.amount_untaxed)
-                   - sum(credit of invoice journal items whose account is in
-                         the excluded accounts configured in Accrual Configuration).
+            billed += invoice.amount_untaxed
+            exclusion += credit of excluded-account journal items
+            Final = total_billed - total_exclusion
 
-        Only invoices with x_studio_invoice_type == 'CE Related' are included.
+        Only posted invoices (out_invoice) with x_studio_invoice_type == 'CE Related'
+        are included.
+
+        Additionally, this method searches for "orphan" invoices — moves NOT
+        linked to any sales order but whose x_studio_old_ce_1 field (on
+        account.move) matches the x_studio_old_ce_ field on one of the given
+        sales orders (normalized comparison).
 
         Args:
             sales_order_ids: set of sale.order IDs
@@ -636,29 +642,184 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         total_billed = 0.0
         total_exclusion = 0.0
+        processed_invoice_ids = set()
+
+        def _apply_credit_memo(credit_memo):
+            """Calculate billed and exclusion for a single credit memo.
+            Returns (billed_delta, exclusion_delta)."""
+            billed_delta = -credit_memo.amount_untaxed
+            exclusion_delta = 0.0
+            if excluded_account_ids:
+                for line in credit_memo.line_ids:
+                    if line.account_id and line.account_id.id in excluded_account_ids:
+                        # In out_refund, income accounts are debited (not credited)
+                        # AND we negate the exclusion to mirror the billed deduction
+                        exclusion_delta -= (line.debit or 0.0)
+                        exclusion_delta += (line.credit or 0.0)
+            return billed_delta, exclusion_delta
+
+        def _apply_invoice(inv):
+            """Calculate billed and exclusion for a single invoice.
+            Returns (billed_delta, exclusion_delta)."""
+            billed_delta = inv.amount_untaxed
+            exclusion_delta = 0.0
+            if excluded_account_ids:
+                for line in inv.line_ids:
+                    if line.account_id and line.account_id.id in excluded_account_ids:
+                        exclusion_delta += (line.credit or 0.0)
+                        exclusion_delta -= (line.debit or 0.0)
+            return billed_delta, exclusion_delta
 
         # Browse sales orders
         sales_orders = self.env['sale.order'].browse(list(sales_order_ids))
 
+        # ------------------------------------------------------------------
+        # STEP 1: Process SO-linked invoices and credit memos
+        # ------------------------------------------------------------------
+        old_ce_codes = set()  # collect old CE codes for orphan lookup later
+
         for so in sales_orders:
-            # Get all invoices related to this sales order
-            invoices = so.invoice_ids.filtered(
+            # Collect the SO's old CE code for orphan invoice matching
+            so_old_ce = getattr(so, 'x_studio_old_ce_', None) or getattr(so, 'x_studio_old_ce', '') or ''
+            if so_old_ce:
+                old_ce_codes.add(self._normalize_ce_code(so_old_ce))
+
+            # Process SO-linked invoices (out_invoice)
+            moves = so.invoice_ids.filtered(
                 lambda inv: inv.state == 'posted'
                 and inv.move_type == 'out_invoice'
                 and inv.invoice_date
                 and month_start <= inv.invoice_date <= month_end
                 and getattr(inv, 'x_studio_invoice_type', '') == 'CE Related'
             )
+            for move in moves:
+                processed_invoice_ids.add(move.id)
+                b_delta, e_delta = _apply_invoice(move)
+                total_billed += b_delta
+                total_exclusion += e_delta
 
-            for invoice in invoices:
-                # Start with the untaxed amount
-                total_billed += invoice.amount_untaxed
+            # Process SO-linked credit memos (out_refund)
+            credit_memos = so.invoice_ids.filtered(
+                lambda inv: inv.state == 'posted'
+                and inv.move_type == 'out_refund'
+                and inv.invoice_date
+                and month_start <= inv.invoice_date <= month_end
+                and getattr(inv, 'x_studio_invoice_type', '') == 'CE Related'
+            )
+            for credit_memo in credit_memos:
+                processed_invoice_ids.add(credit_memo.id)
+                b_delta, e_delta = _apply_credit_memo(credit_memo)
+                total_billed += b_delta
+                total_exclusion += e_delta
 
-                # Subtract credits of journal items on excluded accounts
-                if excluded_account_ids:
-                    for line in invoice.line_ids:
-                        if line.account_id and line.account_id.id in excluded_account_ids:
-                            total_exclusion += (line.credit or 0.0)
+        # ------------------------------------------------------------------
+        # STEP 2: Find orphan invoices (not linked to ANY SO) whose
+        #         x_studio_old_ce_1 matches one of the SO old CE codes.
+        # ------------------------------------------------------------------
+
+        if old_ce_codes:
+
+            orphan_domain = [
+                ('state', '=', 'posted'),
+                ('move_type', '=', 'out_invoice'),
+                ('invoice_date', '>=', month_start),
+                ('invoice_date', '<=', month_end),
+                ('company_id', 'in', self.env.companies.ids),
+                ('x_studio_old_ce_1', '!=', False),
+            ]
+
+            credit_memo_domain = [
+                ('state', '=', 'posted'),
+                ('move_type', '=', 'out_refund'),
+                ('invoice_date', '>=', month_start),
+                ('invoice_date', '<=', month_end),
+                ('company_id', 'in', self.env.companies.ids),
+                ('x_studio_old_ce_1', '!=', False),
+            ]
+
+            try:
+                candidate_moves = self.env['account.move'].sudo().search(orphan_domain)
+                candidate_credit_memos = self.env['account.move'].sudo().search(credit_memo_domain)
+            except Exception:
+                candidate_moves = self.env['account.move']
+                candidate_credit_memos = self.env['account.move']
+
+            for credit_memo in candidate_credit_memos:
+                # Skip already processed (SO-linked) credit memos
+                if credit_memo.id in processed_invoice_ids:
+                    continue
+
+                # Must be CE Related
+                if getattr(credit_memo, 'x_studio_invoice_type', '') != 'CE Related':
+                    continue
+
+                # Check if credit memo's x_studio_old_ce_1 matches any SO old CE
+                inv_old_ce = getattr(credit_memo, 'x_studio_old_ce_1', '') or ''
+                if not inv_old_ce:
+                    continue
+                if self._normalize_ce_code(inv_old_ce) not in old_ce_codes:
+                    continue
+
+                # Verify this credit memo is truly orphan (not linked to ANY SO)
+                has_sale_link = any(
+                    aml.sale_line_ids for aml in credit_memo.line_ids
+                )
+                if has_sale_link:
+                    continue
+
+                # Skip if this reverses an already-processed SO invoice
+                reversed_origin = credit_memo.reversed_entry_id
+                if reversed_origin and reversed_origin.id in processed_invoice_ids:
+                    continue
+
+                # Include this orphan credit memo
+                processed_invoice_ids.add(credit_memo.id)
+                b_delta, e_delta = _apply_credit_memo(credit_memo)
+                total_billed += b_delta
+                total_exclusion += e_delta
+                if credit_memo.name:
+                    _logger.info(
+                        'Included orphan credit memo %s (old CE: %s) in billed calculation '
+                        'with billed_delta %.2f and exclusion_delta %.2f. Total billed so far: %.2f',
+                        credit_memo.name, credit_memo.x_studio_old_ce_1,
+                        b_delta, e_delta, total_billed,
+                    )
+
+            for inv in candidate_moves:
+                # Skip already processed (SO-linked) invoices
+                if inv.id in processed_invoice_ids:
+                    continue
+
+                # Must be CE Related
+                if getattr(inv, 'x_studio_invoice_type', '') != 'CE Related':
+                    continue
+
+                # Check if invoice's x_studio_old_ce_1 matches any SO old CE
+                inv_old_ce = getattr(inv, 'x_studio_old_ce_1', '') or ''
+                if not inv_old_ce:
+                    continue
+                if self._normalize_ce_code(inv_old_ce) not in old_ce_codes:
+                    continue
+
+                # Verify this invoice is truly orphan (not linked to ANY SO)
+                has_sale_link = any(
+                    aml.sale_line_ids for aml in inv.line_ids
+                )
+                if has_sale_link:
+                    continue
+
+                # Include this orphan invoice
+                processed_invoice_ids.add(inv.id)
+                b_delta, e_delta = _apply_invoice(inv)
+                total_billed += b_delta
+                total_exclusion += e_delta
+                if inv.name:
+                    _logger.info(
+                        'Included orphan invoice %s (old CE: %s) in billed calculation '
+                        'with billed_delta %.2f and exclusion_delta %.2f. Total billed so far: %.2f',
+                        inv.name, inv.x_studio_old_ce_1,
+                        b_delta, e_delta, total_billed,
+                    )
 
         return total_billed - total_exclusion
 
