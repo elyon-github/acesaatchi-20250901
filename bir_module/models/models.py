@@ -1168,7 +1168,7 @@ class bir_reports(models.Model):
         return quarter
 
     def fetch_BP(self):
-        query = """ SELECT id, name FROM res_partner WHERE is_company = 'true' AND supplier_rank > 0 AND active = true"""
+        query = """ SELECT id, name FROM res_partner WHERE supplier_rank > 0 AND active = true AND vat IS NOT NULL"""
 
         self._cr.execute(query)
         val = self._cr.fetchall()
