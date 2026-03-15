@@ -689,9 +689,9 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
                 net_amount = total_credit - total_debit  # Net credit amount (positive = more credits, negative = more debits)
                 
                 if net_amount != 0:
-                    # VALIDATION: Check against CE original amount
-                    if record.ce_original_total_amount and abs(net_amount) > abs(record.ce_original_total_amount):
-                        raise UserError(_("Total accrued amount cannot exceed the original CE amount."))
+                    # # VALIDATION: Check against CE original amount
+                    # if record.ce_original_total_amount and abs(net_amount) > abs(record.ce_original_total_amount):
+                    #     raise UserError(_("Total accrued amount cannot exceed the original CE amount."))
                     
                     analytic_distribution = self._calculate_weighted_analytic_distribution(other_lines)
                     

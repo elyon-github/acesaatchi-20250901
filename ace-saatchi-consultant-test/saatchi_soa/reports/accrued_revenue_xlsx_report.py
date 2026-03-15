@@ -1017,19 +1017,8 @@ class AccruedRevenueXLSX(models.AbstractModel):
                 sheet.write(row, 0, partner_name, formats['normal'])
                 
                 # Determine CE# format based on OB and reversal OB presence
-                ce_format = formats['centered']
-                if is_ob_only_row:
-                    # Red: OB-only row (no accrued entries)
-                    ce_format = formats['centered_red']
-                else:
-                    # Check if this CE# is in the reversal opening balances
-                    norm_ce_check = self._normalize_ce_code(ce_code)
-                    if norm_ce_check not in reversal_ob_balances:
-                        # Blue: Has accrued entries but NOT in reversal OB (new CE#)
-                        ce_format = formats['centered_blue']
-                
                 sheet.write(row, 1, ce_data['so_reference'], formats['centered'])
-                sheet.write(row, 2, ce_code, ce_format)
+                sheet.write(row, 2, ce_code, formats['centered'])
 
                 if ce_data['ce_date']:
                     sheet.write(row, 3, ce_data['ce_date'], formats['date'])

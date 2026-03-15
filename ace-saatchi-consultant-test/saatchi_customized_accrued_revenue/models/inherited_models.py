@@ -119,50 +119,122 @@ class SaleOrder(models.Model):
         ])
 
         if client_sig_sos:
-            # Build normalized set of CE codes from reversal opening balances
-            # Only include records whose balance_date matches the OPENING BALANCE MONTH
-            # Opening balance month = cutoff_date + 1 month (first accrual after cutoff)
-            # So for cutoff 12/31/2025, only include when accrual_date is 01/31/2026 (prev month = 12/31)
+            # ── Tier 1: Reversal OB match — ONLY for the cutoff month ──
+            # This tier fires exactly once: when generating accruals for the
+            # month immediately after the configured cutoff date.
+            # e.g. cutoff = 2025-12-31 → Tier 1 only fires for Jan 2026
+            #      (accrual_date = 2026-01-31, prev_month_end = 2025-12-31)
+            # For Feb 2026 and beyond, Tier 2 (continuation chain) takes over.
             first_of_accrual_month = accrual_date.replace(day=1)
             prev_month_end = first_of_accrual_month - relativedelta(days=1)
-            
-            reversal_ob_records = self.env[
-                'saatchi.accrued_revenue_reversal_opening_balance'
-            ].sudo().search([
+
+            accrual_config = self.env['saatchi.accrual_config'].sudo().search([
                 ('company_id', '=', self.env.company.id),
-                ('balance_date', '=', prev_month_end),
-            ])
-            reversal_ob_ce_codes = set()
-            for rec in reversal_ob_records:
-                if rec.ce_code:
-                    reversal_ob_ce_codes.add(
-                        self._normalize_ce_code_for_match(rec.ce_code)
-                    )
+            ], limit=1)
+            cutoff_date = accrual_config.opening_balance_cutoff_date if accrual_config else False
 
-            for so in client_sig_sos:
-                old_ce = getattr(so, 'x_studio_old_ce', '')
-                if old_ce and self._normalize_ce_code_for_match(old_ce) in reversal_ob_ce_codes:
-                    potential |= so
-                    client_sig_so_ids.add(so.id)
+            is_cutoff_month = cutoff_date and prev_month_end == cutoff_date
 
-                    existing = self.env['saatchi.accrued_revenue'].search([
-                        ('x_related_ce_id', '=', so.id),
-                        ('date', '>=', accrual_date),
-                        ('date', '<=', reversal_date),
-                        ('state', 'in', ['draft', 'accrued', 'reversed'])
-                    ], limit=1)
+            if is_cutoff_month:
+                reversal_ob_records = self.env[
+                    'saatchi.accrued_revenue_reversal_opening_balance'
+                ].sudo().search([
+                    ('company_id', '=', self.env.company.id),
+                    ('balance_date', '=', prev_month_end),
+                ])
+                reversal_ob_ce_codes = set()
+                for rec in reversal_ob_records:
+                    if rec.ce_code:
+                        reversal_ob_ce_codes.add(
+                            self._normalize_ce_code_for_match(rec.ce_code)
+                        )
 
-                    if existing:
-                        duplicates |= so
+                # Fetch opening balance data to check balance > 0
+                ob_balances = self.env[
+                    'saatchi.accrued_revenue_opening_balance'
+                ].sudo().get_opening_balances_for_month(
+                    balance_date=prev_month_end,
+                    company_id=self.env.company.id,
+                )
 
-        # ── Continuation: Client Signature SOs that had accruals in previous month ──
-        # For months AFTER the cutoff month, pick up for_client_signature SOs
-        # that already have an accrual record from the previous month.
-        # This keeps them in the cycle once they entered via reversal OB.
+                for so in client_sig_sos:
+                    old_ce = getattr(so, 'x_studio_old_ce', '')
+                    if old_ce and self._normalize_ce_code_for_match(old_ce) in reversal_ob_ce_codes:
+                        # Only include if opening balance for this CE > 0
+                        norm_old_ce = self._normalize_ce_code_for_match(old_ce)
+                        ob_balance = ob_balances.get(norm_old_ce, 0.0)
+                        if ob_balance <= 0:
+                            _logger.debug(
+                                'Skipping Client Signature SO %s (CE %s): '
+                                'opening balance %.2f <= 0',
+                                so.name, old_ce, ob_balance,
+                            )
+                            continue
+
+                        potential |= so
+                        client_sig_so_ids.add(so.id)
+
+                        existing = self.env['saatchi.accrued_revenue'].search([
+                            ('x_related_ce_id', '=', so.id),
+                            ('date', '>=', accrual_date),
+                            ('date', '<=', reversal_date),
+                            ('state', 'in', ['draft', 'accrued', 'reversed'])
+                        ], limit=1)
+
+                        if existing:
+                            duplicates |= so
+
+        # ── Tier 2: Continuation chain — Client Signature SOs with previous month accrual ──
+        # Picks up for_client_signature SOs that already have an accrual record
+        # from the previous month. This creates a chain: Tier 1 seeds the first
+        # month (cutoff), then Tier 2 carries them forward month-by-month.
+        # Chain breaks when previous month's ending balance drops to 0 or below.
         if client_sig_sos:
-            first_of_accrual_month = accrual_date.replace(day=1)
+            # Reuse first_of_accrual_month/prev_month_end from Tier 1 if available,
+            # otherwise compute them (in case Tier 1 was skipped)
+            if 'first_of_accrual_month' not in dir():
+                first_of_accrual_month = accrual_date.replace(day=1)
+                prev_month_end = first_of_accrual_month - relativedelta(days=1)
             prev_month_start = (first_of_accrual_month - relativedelta(months=1))
-            prev_month_end = first_of_accrual_month - relativedelta(days=1)
+
+            # Reuse accrual_config from Tier 1 if available
+            if 'accrual_config' not in dir():
+                accrual_config = self.env['saatchi.accrual_config'].sudo().search([
+                    ('company_id', '=', self.env.company.id),
+                ], limit=1)
+                cutoff_date = accrual_config.opening_balance_cutoff_date if accrual_config else False
+
+            # Pre-compute previous month ending balances from DB for
+            # Client Signature CEs (accrued revenue account, cumulative
+            # debit - credit up to prev_month_end).
+            accrued_account_ids = []
+            if accrual_config and accrual_config.accrued_revenue_account_id:
+                accrued_account_ids = accrual_config.accrued_revenue_account_id.ids
+
+            # Build a map of normalized CE code -> cumulative balance
+            prev_month_ce_balances = {}
+            if accrued_account_ids:
+                prev_lines = self.env['account.move.line'].sudo().search([
+                    ('account_id', 'in', accrued_account_ids),
+                    ('date', '<=', prev_month_end),
+                    ('parent_state', '=', 'posted'),
+                ])
+                for line in prev_lines:
+                    ce_code = line.x_ce_code or ''
+                    if ce_code:
+                        norm = self._normalize_ce_code_for_match(ce_code)
+                        prev_month_ce_balances[norm] = prev_month_ce_balances.get(norm, 0.0) + (line.debit or 0) - (line.credit or 0)
+
+            # Also check opening balance as fallback for CEs with no DB history
+            cutoff_date = accrual_config.opening_balance_cutoff_date if accrual_config else False
+            ob_fallback_balances = {}
+            if cutoff_date:
+                ob_fallback_balances = self.env[
+                    'saatchi.accrued_revenue_opening_balance'
+                ].sudo().get_opening_balances_for_month(
+                    balance_date=cutoff_date,
+                    company_id=self.env.company.id,
+                )
 
             for so in client_sig_sos:
                 if so in potential:
@@ -178,6 +250,32 @@ class SaleOrder(models.Model):
                 ], limit=1)
 
                 if prev_accrual:
+                    # Check previous month ending balance > 0
+                    old_ce = getattr(so, 'x_studio_old_ce', '') or ''
+                    ce_code_for_balance = so.x_ce_code or ''
+                    norm_old_ce = self._normalize_ce_code_for_match(old_ce) if old_ce else ''
+                    norm_ce = self._normalize_ce_code_for_match(ce_code_for_balance) if ce_code_for_balance else ''
+
+                    # Try DB balance first (old CE or regular CE)
+                    balance = prev_month_ce_balances.get(norm_old_ce, None)
+                    if balance is None and norm_ce:
+                        balance = prev_month_ce_balances.get(norm_ce, None)
+
+                    # Fallback to opening balance if no DB history
+                    if balance is None:
+                        balance = ob_fallback_balances.get(norm_old_ce, None)
+                        if balance is None and norm_ce:
+                            balance = ob_fallback_balances.get(norm_ce, None)
+
+                    if balance is None or balance <= 0:
+                        _logger.debug(
+                            'Skipping continuation Client Signature SO %s (CE %s): '
+                            'prev month balance %.2f <= 0',
+                            so.name, old_ce or ce_code_for_balance,
+                            balance if balance is not None else 0.0,
+                        )
+                        continue
+
                     potential |= so
                     client_sig_so_ids.add(so.id)
 
