@@ -14,7 +14,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
     _name = 'report.sales_order_revenue_xlsx'
     _inherit = 'report.report_xlsx.abstract'
     _description = 'Sales Order Revenue XLSX Report'
-    
+
     def _get_accrued_revenue_account_id(self):
         """Get accrued revenue account IDs with fallback for multiple companies"""
         # Use user's allowed companies as target companies
@@ -24,22 +24,23 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 'account.accrued_revenue_account_id',
                 default='0'
             ) or 0)
-            
+
             if account_id:
-                template_account = self.env['account.account'].sudo().browse(account_id)
+                template_account = self.env['account.account'].sudo().browse(
+                    account_id)
                 if template_account.exists() and not template_account.deprecated:
                     # Check if account is accessible by user's allowed companies
                     if any(company in template_account.company_ids for company in target_companies):
                         # Account is accessible and valid for at least one target company
                         return template_account.ids
-                    
+
                     # Find the equivalent accounts in target companies
                     equivalent_accounts = self.env['account.account'].sudo().search([
                         ('name', '=', template_account.name),
                         ('company_ids', 'in', target_companies.ids),
                         ('deprecated', '=', False)
                     ])
-                    
+
                     if not equivalent_accounts:
                         # Fallback: try by name
                         equivalent_accounts = self.env['account.account'].sudo().search([
@@ -47,22 +48,22 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                             ('company_ids', 'in', target_companies.ids),
                             ('deprecated', '=', False)
                         ])
-                    
+
                     if equivalent_accounts:
                         return equivalent_accounts.ids
-            
+
             # Fallback: Find miscellaneous income accounts
             misc_accounts = self.env['account.account'].sudo().search([
                 ('account_type', '=', 'income_other'),
                 ('deprecated', '=', False),
                 ('company_ids', 'in', target_companies.ids)
             ])
-            
+
             return misc_accounts.ids if misc_accounts else []
-            
+
         except (ValueError, TypeError):
             return []
-            
+
     def _define_formats(self, workbook):
         """Define and return format objects."""
         base_font = {'font_name': 'Calibri', 'font_size': 10}
@@ -171,7 +172,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             if config and config.opening_balance_cutoff_date:
                 return config.opening_balance_cutoff_date
         except Exception as e:
-            _logger.warning('Could not retrieve opening balance cutoff date: %s', str(e))
+            _logger.warning(
+                'Could not retrieve opening balance cutoff date: %s', str(e))
         return False
 
     def _find_sale_order_by_ce_code(self, ce_code):
@@ -182,23 +184,27 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         SaleOrder = self.env['sale.order'].sudo()
         company_domain = [('company_id', 'in', self.env.companies.ids)]
 
-        so = SaleOrder.search([('x_ce_code', '=', ce_code)] + company_domain, limit=1)
+        so = SaleOrder.search(
+            [('x_ce_code', '=', ce_code)] + company_domain, limit=1)
         if so:
             return so
 
         try:
-            so = SaleOrder.search([('x_studio_old_ce', '=', ce_code)] + company_domain, limit=1)
+            so = SaleOrder.search(
+                [('x_studio_old_ce', '=', ce_code)] + company_domain, limit=1)
             if so:
                 return so
         except Exception:
             pass
 
-        so = SaleOrder.search([('x_ce_code', 'ilike', ce_code.strip())] + company_domain, limit=1)
+        so = SaleOrder.search(
+            [('x_ce_code', 'ilike', ce_code.strip())] + company_domain, limit=1)
         if so:
             return so
 
         try:
-            so = SaleOrder.search([('x_studio_old_ce', 'ilike', ce_code.strip())] + company_domain, limit=1)
+            so = SaleOrder.search(
+                [('x_studio_old_ce', 'ilike', ce_code.strip())] + company_domain, limit=1)
             if so:
                 return so
         except Exception:
@@ -217,7 +223,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
     def _calculate_reversal_opening_balances(self, report_month):
         """Get reversal opening balances for the opening balance month.
-        
+
         Uses the same 2-tier approach as the original accrued revenue report:
         1. PRIMARY: Check for DB reversal entries. If a CE# has DB reversal
            transactions, its computed amounts take priority.
@@ -238,17 +244,20 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         db_reversal_ce_codes = set()
         accrued_account_ids = self._get_accrued_revenue_account_id()
         if accrued_account_ids:
-            accrual_month_end = (accrual_month + relativedelta(months=1)) - relativedelta(days=1)
+            accrual_month_end = (
+                accrual_month + relativedelta(months=1)) - relativedelta(days=1)
             reversal_lines = self.env['account.move.line'].sudo().search([
                 ('account_id', 'in', accrued_account_ids),
                 ('date', '>=', accrual_month),
                 ('date', '<=', accrual_month_end),
                 ('parent_state', '=', 'posted'),
-                ('x_type_of_entry', 'in', ['reversal_system', 'reversal_manual']),
+                ('x_type_of_entry', 'in', [
+                 'reversal_system', 'reversal_manual']),
             ])
             for line in reversal_lines:
                 if line.x_ce_code:
-                    db_reversal_ce_codes.add(self._normalize_ce_code(line.x_ce_code))
+                    db_reversal_ce_codes.add(
+                        self._normalize_ce_code(line.x_ce_code))
 
         # Fetch reversal OB records
         try:
@@ -279,7 +288,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
     def _merge_reversal_opening_balance_rows(self, grouped_data):
         """Merge reversal-opening-balance-only rows into grouped_data.
-        
+
         For CE codes that exist in the reversal opening balance model but have NO
         accrual records, create a row from matching sale.order or reversal OB fields.
         """
@@ -295,7 +304,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 company_id=self.env.company.id
             )
         except Exception as e:
-            _logger.warning('Error fetching reversal OB records for row merge: %s', str(e))
+            _logger.warning(
+                'Error fetching reversal OB records for row merge: %s', str(e))
             return
 
         if not reversal_ob_records:
@@ -309,44 +319,54 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         existing_normalized_ces = set()
         for partner_name, ces in grouped_data.items():
             for ce_code_key in ces.keys():
-                existing_normalized_ces.add(self._normalize_ce_code(ce_code_key))
+                existing_normalized_ces.add(
+                    self._normalize_ce_code(ce_code_key))
                 # Look up SO by CE code and add its x_studio_old_ce
                 so = self._find_sale_order_by_ce_code(ce_code_key)
                 if so:
                     old_ce = getattr(so, 'x_studio_old_ce', '') or ''
                     if old_ce:
-                        existing_normalized_ces.add(self._normalize_ce_code(old_ce))
+                        existing_normalized_ces.add(
+                            self._normalize_ce_code(old_ce))
 
         # Add reversal-OB-only rows for CEs not already present
         for norm_ce, rob_data in reversal_ob_records.items():
             if norm_ce in existing_normalized_ces:
                 continue
 
-            so = self._find_sale_order_by_ce_code(rob_data.get('ce_code_display', ''))
+            so = self._find_sale_order_by_ce_code(
+                rob_data.get('ce_code_display', ''))
 
             if so:
-                partner_name = (so.partner_id.name or rob_data.get('partner_name') or 'UNKNOWN').upper()
+                partner_name = (so.partner_id.name or rob_data.get(
+                    'partner_name') or 'UNKNOWN').upper()
                 ce_code_display = (
                     getattr(so, 'x_studio_old_ce', '') or
                     so.x_ce_code or
                     rob_data.get('ce_code_display', 'NO_CE')
                 ).upper()
                 old_ce_date = getattr(so, 'x_studio_old_ce_date', False)
-                ce_date = old_ce_date or so.date_order or rob_data.get('ce_date')
-                description = (getattr(so, 'x_job_description', '') or rob_data.get('job_description', '')).upper()
+                ce_date = old_ce_date or so.date_order or rob_data.get(
+                    'ce_date')
+                description = (getattr(so, 'x_job_description', '')
+                               or rob_data.get('job_description', '')).upper()
 
                 ce_status = ''
                 if hasattr(so, 'x_ce_status') and so.x_ce_status:
                     try:
-                        status_selection = dict(so._fields['x_ce_status'].selection)
-                        ce_status = status_selection.get(so.x_ce_status, '').upper()
+                        status_selection = dict(
+                            so._fields['x_ce_status'].selection)
+                        ce_status = status_selection.get(
+                            so.x_ce_status, '').upper()
                     except Exception:
                         pass
                 if not ce_status and rob_data.get('ce_status'):
                     ce_status = rob_data.get('ce_status', '').upper()
             else:
-                partner_name = (rob_data.get('partner_name') or 'UNKNOWN').upper()
-                ce_code_display = (rob_data.get('ce_code_display') or 'NO_CE').upper()
+                partner_name = (rob_data.get('partner_name')
+                                or 'UNKNOWN').upper()
+                ce_code_display = (rob_data.get(
+                    'ce_code_display') or 'NO_CE').upper()
                 ce_date = rob_data.get('ce_date')
                 description = (rob_data.get('job_description') or '').upper()
                 ce_status = (rob_data.get('ce_status') or '').upper()
@@ -357,6 +377,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 'year': ce_date.year if ce_date else None,
                 'month': ce_date.strftime('%B').upper() if ce_date else None,
                 'ce_status': ce_status,
+                'so_reference': '',
                 'lines': [],
                 'sales_orders': set(),
             }
@@ -397,8 +418,10 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 if so:
                     if needs_status and hasattr(so, 'x_ce_status') and so.x_ce_status:
                         try:
-                            status_selection = dict(so._fields['x_ce_status'].selection)
-                            ce_data['ce_status'] = status_selection.get(so.x_ce_status, '').upper()
+                            status_selection = dict(
+                                so._fields['x_ce_status'].selection)
+                            ce_data['ce_status'] = status_selection.get(
+                                so.x_ce_status, '').upper()
                             needs_status = not ce_data['ce_status']
                         except Exception:
                             pass
@@ -427,11 +450,12 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                     if needs_date and rob_data.get('ce_date'):
                         ce_data['ce_date'] = rob_data['ce_date']
                         ce_data['year'] = rob_data['ce_date'].year
-                        ce_data['month'] = rob_data['ce_date'].strftime('%B').upper()
+                        ce_data['month'] = rob_data['ce_date'].strftime(
+                            '%B').upper()
 
     def _sanitize_sheet_name(self, name):
         """Sanitize sheet name to comply with Excel rules
-        
+
         Excel sheet name rules:
         - Max 31 characters
         - Cannot contain: \ / ? * [ ]
@@ -439,21 +463,21 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         """
         if not name:
             return 'UNNAMED'
-        
+
         # Remove invalid characters
         invalid_chars = ['\\', '/', '?', '*', '[', ']']
         for char in invalid_chars:
             name = name.replace(char, '')
-        
+
         # Truncate to 31 characters
         if len(name) > 31:
             name = name[:31]
-        
+
         return name if name else 'UNNAMED'
 
     def _group_lines_by_ce(self, lines, report_month, all_billed_so_ids=None):
         """Group account.move.line records by partner and CE code
-        
+
         Includes:
         - Lines from accrued revenue entries
         - ALL sales orders that were billed in the report month (whether they have accrued entries or not)
@@ -464,6 +488,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             'year': None,
             'month': None,
             'ce_status': '',
+            'so_reference': '',
             'lines': [],
             'sales_orders': set()
         }))
@@ -471,12 +496,14 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # Calculate date ranges
         # Reversal month: current report month
         reversal_start = report_month.replace(day=1)
-        reversal_end = (reversal_start + relativedelta(months=1)) - relativedelta(days=1)
+        reversal_end = (reversal_start + relativedelta(months=1)
+                        ) - relativedelta(days=1)
 
         # Accrual month: 1 month before report month
         accrual_month = report_month - relativedelta(months=1)
         accrual_start = accrual_month.replace(day=1)
-        accrual_end = (accrual_start + relativedelta(months=1)) - relativedelta(days=1)
+        accrual_end = (accrual_start + relativedelta(months=1)
+                       ) - relativedelta(days=1)
 
         # Process accrued revenue lines
         relevant_lines = []
@@ -489,7 +516,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 relevant_lines.append(line)
 
         for line in relevant_lines:
-            partner_name = line.partner_id.name.upper() if line.partner_id and line.partner_id.name else 'UNKNOWN'
+            partner_name = line.partner_id.name.upper(
+            ) if line.partner_id and line.partner_id.name else 'UNKNOWN'
             ce_code = line.x_ce_code.upper() if line.x_ce_code else 'NO_CE'
 
             # Store line for processing
@@ -497,13 +525,15 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
             # Track sales order for billing calculation
             if line.x_sales_order:
-                grouped[partner_name][ce_code]['sales_orders'].add(line.x_sales_order.id)
+                grouped[partner_name][ce_code]['sales_orders'].add(
+                    line.x_sales_order.id)
 
             # Capture CE-level fields (use first non-empty value found)
             if line.x_ce_date and not grouped[partner_name][ce_code]['ce_date']:
                 grouped[partner_name][ce_code]['ce_date'] = line.x_ce_date
                 grouped[partner_name][ce_code]['year'] = line.x_ce_date.year
-                grouped[partner_name][ce_code]['month'] = line.x_ce_date.strftime('%B').upper()
+                grouped[partner_name][ce_code]['month'] = line.x_ce_date.strftime(
+                    '%B').upper()
 
             if line.move_id and line.move_id.x_related_custom_accrued_record and not grouped[partner_name][ce_code]['description']:
                 desc = line.move_id.x_related_custom_accrued_record.ce_job_description or ''
@@ -512,47 +542,61 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             if line.x_ce_status and not grouped[partner_name][ce_code]['ce_status']:
                 selection_dict = dict(line._fields['x_ce_status'].selection)
                 ce_status = selection_dict.get(line.x_ce_status, '')
-                grouped[partner_name][ce_code]['ce_status'] = ce_status.upper() if ce_status else ''
+                grouped[partner_name][ce_code]['ce_status'] = ce_status.upper(
+                ) if ce_status else ''
+
+            if line.move_id and line.move_id.x_related_custom_accrued_record and not grouped[partner_name][ce_code]['so_reference']:
+                accrued_record = line.move_id.x_related_custom_accrued_record
+                so_ref = ''
+                if accrued_record.x_related_ce_id:
+                    so_ref = accrued_record.x_related_ce_id.name or ''
+                grouped[partner_name][ce_code]['so_reference'] = so_ref.upper(
+                ) if so_ref else ''
 
         # Process ALL billed sales orders (including those already in grouped data)
         if all_billed_so_ids:
             all_billed_sos = self.env['sale.order'].browse(all_billed_so_ids)
-            
+
             for so in all_billed_sos:
-                partner_name = so.partner_id.name.upper() if so.partner_id and so.partner_id.name else 'UNKNOWN'
+                partner_name = so.partner_id.name.upper(
+                ) if so.partner_id and so.partner_id.name else 'UNKNOWN'
                 ce_code = so.x_ce_code.upper() if so.x_ce_code else 'NO_CE'
-                
+
                 # If the SO has x_studio_old_ce that already exists as a key
                 # in grouped_data for this partner, merge into that row instead
                 # of creating a duplicate (e.g. SO "BLFSO000211" with
                 # x_studio_old_ce "BLF 00004" should merge into "BLF 00004").
-                old_ce = (getattr(so, 'x_studio_old_ce', '') or '').upper().strip()
+                old_ce = (getattr(so, 'x_studio_old_ce', '')
+                          or '').upper().strip()
                 if old_ce and partner_name in grouped and old_ce in grouped[partner_name]:
                     ce_code = old_ce
-                
+
                 # Add SO to sales_orders set (will merge with existing if already present)
                 grouped[partner_name][ce_code]['sales_orders'].add(so.id)
-                
+
                 # Populate CE-level fields from SO if not already set
                 if so.date_order and not grouped[partner_name][ce_code]['ce_date']:
                     grouped[partner_name][ce_code]['ce_date'] = so.date_order
                     grouped[partner_name][ce_code]['year'] = so.date_order.year
-                    grouped[partner_name][ce_code]['month'] = so.date_order.strftime('%B').upper()
-                
+                    grouped[partner_name][ce_code]['month'] = so.date_order.strftime(
+                        '%B').upper()
+
                 # Get description from SO if available and not already set
                 if hasattr(so, 'x_job_description') and so.x_job_description and not grouped[partner_name][ce_code]['description']:
-                    grouped[partner_name][ce_code]['description'] = so.x_job_description.upper()
-                
+                    grouped[partner_name][ce_code]['description'] = so.x_job_description.upper(
+                    )
+
                 if so.x_ce_status and not grouped[partner_name][ce_code]['ce_status']:
                     selection_dict = dict(so._fields['x_ce_status'].selection)
                     ce_status = selection_dict.get(so.x_ce_status, '')
-                    grouped[partner_name][ce_code]['ce_status'] = ce_status.upper() if ce_status else ''
+                    grouped[partner_name][ce_code]['ce_status'] = ce_status.upper(
+                    ) if ce_status else ''
 
         return grouped
 
     def _calculate_amounts_by_type(self, lines, report_month):
         """Calculate amounts for each entry type category
-        
+
         Logic:
         - Reversals: from current report month (e.g., if report_month is July, reversals from July)
         - Accruals: from 1 month ago (e.g., if report_month is July, accruals from June)
@@ -566,7 +610,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Calculate date range: all entries use the report month
         month_start = report_month.replace(day=1)
-        month_end = (month_start + relativedelta(months=1)) - relativedelta(days=1)
+        month_end = (month_start + relativedelta(months=1)) - \
+            relativedelta(days=1)
 
         for line in lines:
             if not line.date:
@@ -604,7 +649,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             if config and config.excluded_billed_account_ids:
                 return set(config.excluded_billed_account_ids.ids)
         except Exception as e:
-            _logger.warning('Could not retrieve excluded billed accounts: %s', str(e))
+            _logger.warning(
+                'Could not retrieve excluded billed accounts: %s', str(e))
         return set()
 
     def _calculate_billed_amount(self, sales_order_ids, report_month):
@@ -635,7 +681,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Get the start and end of the report month
         month_start = report_month.replace(day=1)
-        month_end = (month_start + relativedelta(months=1)) - relativedelta(days=1)
+        month_end = (month_start + relativedelta(months=1)) - \
+            relativedelta(days=1)
 
         # Get excluded account IDs from accrual configuration
         excluded_account_ids = self._get_excluded_billed_account_ids()
@@ -680,7 +727,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         for so in sales_orders:
             # Collect the SO's old CE code for orphan invoice matching
-            so_old_ce = getattr(so, 'x_studio_old_ce_', None) or getattr(so, 'x_studio_old_ce', '') or ''
+            so_old_ce = getattr(so, 'x_studio_old_ce_', None) or getattr(
+                so, 'x_studio_old_ce', '') or ''
             if so_old_ce:
                 old_ce_codes.add(self._normalize_ce_code(so_old_ce))
 
@@ -738,8 +786,10 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             ]
 
             try:
-                candidate_moves = self.env['account.move'].sudo().search(orphan_domain)
-                candidate_credit_memos = self.env['account.move'].sudo().search(credit_memo_domain)
+                candidate_moves = self.env['account.move'].sudo().search(
+                    orphan_domain)
+                candidate_credit_memos = self.env['account.move'].sudo().search(
+                    credit_memo_domain)
             except Exception:
                 candidate_moves = self.env['account.move']
                 candidate_credit_memos = self.env['account.move']
@@ -754,7 +804,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                     continue
 
                 # Check if credit memo's x_studio_old_ce_1 matches any SO old CE
-                inv_old_ce = getattr(credit_memo, 'x_studio_old_ce_1', '') or ''
+                inv_old_ce = getattr(
+                    credit_memo, 'x_studio_old_ce_1', '') or ''
                 if not inv_old_ce:
                     continue
                 if self._normalize_ce_code(inv_old_ce) not in old_ce_codes:
@@ -826,7 +877,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
     def generate_xlsx_report(self, workbook, data, docids):
         """
         Main report generation method.
-        
+
         Args:
             workbook: xlsxwriter workbook object
             data: dictionary containing report_date, partner_ids, and move_line_ids from wizard
@@ -835,7 +886,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # Extract report date from wizard data
         if data and 'report_date' in data:
             report_date_str = data['report_date']
-            report_month = datetime.datetime.strptime(report_date_str, '%Y-%m-%d').date()
+            report_month = datetime.datetime.strptime(
+                report_date_str, '%Y-%m-%d').date()
         else:
             # Fallback to today if no date provided
             report_month = datetime.date.today()
@@ -849,17 +901,19 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Validate move_lines
         if not move_lines:
-            raise UserError("No accrued revenue entries found for the selected criteria.")
+            raise UserError(
+                "No accrued revenue entries found for the selected criteria.")
 
         # Define formats
         formats = self._define_formats(workbook)
 
         # Get all billed SO IDs from data
         all_billed_so_ids = data.get('all_billed_so_ids', []) if data else []
-        
+
         # Group lines by partner and CE (includes both accrued and billed)
-        grouped_data = self._group_lines_by_ce(move_lines, report_month, all_billed_so_ids)
-        
+        grouped_data = self._group_lines_by_ce(
+            move_lines, report_month, all_billed_so_ids)
+
         # Merge reversal opening balance rows (for CEs only in OB, no journal entries)
         self._merge_reversal_opening_balance_rows(grouped_data)
 
@@ -870,7 +924,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             raise UserError("No data found for the report month.")
 
         # Calculate reversal opening balances for fallback
-        reversal_ob_balances = self._calculate_reversal_opening_balances(report_month)
+        reversal_ob_balances = self._calculate_reversal_opening_balances(
+            report_month)
 
         # Generate summary sheet first
         self._generate_summary_sheet(
@@ -887,7 +942,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         """Generate summary sheet with customer totals (no CE breakdown)"""
         if reversal_ob_balances is None:
             reversal_ob_balances = {}
-        
+
         sheet_name = 'SUMMARY'
         sheet = workbook.add_worksheet(sheet_name)
 
@@ -911,7 +966,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         row = 0
         sheet.write(row, 0, self.env.company.name, formats['title'])
         row += 1
-        sheet.write(row, 0, f'REVENUE REPORT SUMMARY - {month_full}', formats['title'])
+        sheet.write(
+            row, 0, f'REVENUE REPORT SUMMARY - {month_full}', formats['title'])
         row += 1
         sheet.write(row, 0, report_date, formats['title'])
         row += 2
@@ -933,7 +989,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # Write summary data rows (aggregate by customer)
         for partner_name in sorted(grouped_data.keys()):
             ces_data = grouped_data[partner_name]
-            
+
             # Aggregate all amounts for this customer
             total_amounts = {
                 'system_accrual': 0,
@@ -941,16 +997,17 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 'manual_accrual': 0,
                 'manual_reversal': 0
             }
-            
+
             # Collect all descriptions, years, months, and sales orders
             descriptions = set()
             years = set()
             months = set()
             all_sales_orders = set()
-            
+
             for ce_code, ce_data in ces_data.items():
-                amounts = self._calculate_amounts_by_type(ce_data['lines'], report_month)
-                
+                amounts = self._calculate_amounts_by_type(
+                    ce_data['lines'], report_month)
+
                 # Apply reversal OB fallback for this CE.
                 # Try CE code first, then x_studio_old_ce from linked SO
                 # (e.g. SO "BLFSO000211" with x_studio_old_ce "BLF 00004").
@@ -971,37 +1028,39 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 manual_reversal_val = amounts['manual_reversal']
                 if manual_reversal_val == 0 and rev_ob.get('manual_reversal', 0) != 0:
                     manual_reversal_val = rev_ob['manual_reversal']
-                manual_reversal_val -= rev_ob.get('manual_reversal_adjustment', 0)
+                manual_reversal_val -= rev_ob.get(
+                    'manual_reversal_adjustment', 0)
 
                 total_amounts['system_accrual'] += amounts['system_accrual']
                 total_amounts['system_reversal'] += system_reversal_val
                 total_amounts['manual_accrual'] += amounts['manual_accrual']
                 total_amounts['manual_reversal'] += manual_reversal_val
-                
+
                 if ce_data['description']:
                     descriptions.add(ce_data['description'])
                 if ce_data['year']:
                     years.add(str(ce_data['year']))
                 if ce_data['month']:
                     months.add(ce_data['month'])
-                
+
                 # Collect all sales orders for this customer
                 all_sales_orders.update(ce_data['sales_orders'])
-            
+
             # Calculate billed amount for all sales orders of this customer
-            billed_amount = self._calculate_billed_amount(all_sales_orders, report_month)
+            billed_amount = self._calculate_billed_amount(
+                all_sales_orders, report_month)
 
             # Write customer row
             sheet.write(row, 0, partner_name, formats['normal'])
-            
+
             # Concatenate multiple descriptions if any
             desc_str = ', '.join(sorted(descriptions)) if descriptions else ''
             sheet.write(row, 1, desc_str, formats['normal'])
-            
+
             # Year is always the report month's year
             year_str = str(report_month.year)
             sheet.write(row, 2, year_str, formats['centered'])
-            
+
             # Concatenate multiple months
             month_str = report_month.strftime('%B').upper()
             sheet.write(row, 3, month_str, formats['centered'])
@@ -1009,10 +1068,14 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             # Write BILLED amount
             sheet.write(row, 4, billed_amount, formats['currency_negative'])
 
-            sheet.write(row, 5, total_amounts['system_accrual'], formats['currency_negative'])
-            sheet.write(row, 6, total_amounts['system_reversal'], formats['currency_negative'])
-            sheet.write(row, 7, total_amounts['manual_accrual'], formats['currency_negative'])
-            sheet.write(row, 8, total_amounts['manual_reversal'], formats['currency_negative'])
+            sheet.write(
+                row, 5, total_amounts['system_accrual'], formats['currency_negative'])
+            sheet.write(
+                row, 6, total_amounts['system_reversal'], formats['currency_negative'])
+            sheet.write(
+                row, 7, total_amounts['manual_accrual'], formats['currency_negative'])
+            sheet.write(
+                row, 8, total_amounts['manual_reversal'], formats['currency_negative'])
 
             # Total formula
             excel_row = row + 1
@@ -1052,7 +1115,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Empty cells before TOTAL label
         for col in range(0, 3):
-            sheet.write(total_row, col, '', formats['section_header_no_border'])
+            sheet.write(total_row, col, '',
+                        formats['section_header_no_border'])
 
         # TOTAL label
         sheet.write(total_row, 3, 'TOTAL', bold_with_border)
@@ -1077,7 +1141,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         """Generate individual customer sheet with CE breakdown"""
         if reversal_ob_balances is None:
             reversal_ob_balances = {}
-        
+
         # Sanitize sheet name
         sheet_name = self._sanitize_sheet_name(partner_name)
         sheet = workbook.add_worksheet(sheet_name)
@@ -1089,22 +1153,23 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Set column widths
         sheet.set_column(0, 0, 15)   # CE#
-        sheet.set_column(1, 1, 12)   # CE DATE
-        sheet.set_column(2, 2, 40)   # DESCRIPTION
-        sheet.set_column(3, 3, 8)    # Year
-        sheet.set_column(4, 4, 12)   # Month
-        sheet.set_column(5, 5, 18)   # BILLED
-        sheet.set_column(6, 6, 18)   # System Accrual
-        sheet.set_column(7, 7, 18)   # System Reversal
-        sheet.set_column(8, 8, 18)   # Manual Accrual
-        sheet.set_column(9, 9, 18)   # Manual Reversal
-        sheet.set_column(10, 10, 15) # Total
-        sheet.set_column(11, 11, 20) # CE Status
-        sheet.set_column(12, 12, 15) # Per CSD
-        sheet.set_column(13, 13, 15) # Variance
-        sheet.set_column(14, 14, 20) # Cost to Client
-        sheet.set_column(15, 15, 20) # For Revenue Adjustment
-        sheet.set_column(16, 16, 30) # Remarks
+        sheet.set_column(1, 1, 18)   # SO Reference
+        sheet.set_column(2, 2, 12)   # CE DATE
+        sheet.set_column(3, 3, 40)   # DESCRIPTION
+        sheet.set_column(4, 4, 8)    # Year
+        sheet.set_column(5, 5, 12)   # Month
+        sheet.set_column(6, 6, 18)   # BILLED
+        sheet.set_column(7, 7, 18)   # System Accrual
+        sheet.set_column(8, 8, 18)   # System Reversal
+        sheet.set_column(9, 9, 18)   # Manual Accrual
+        sheet.set_column(10, 10, 18)  # Manual Reversal
+        sheet.set_column(11, 11, 15)  # Total
+        sheet.set_column(12, 12, 20)  # CE Status
+        sheet.set_column(13, 13, 15)  # Per CSD
+        sheet.set_column(14, 14, 15)  # Variance
+        sheet.set_column(15, 15, 20)  # Cost to Client
+        sheet.set_column(16, 16, 20)  # For Revenue Adjustment
+        sheet.set_column(17, 17, 30)  # Remarks
 
         # Write report header
         row = 0
@@ -1119,7 +1184,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Write column headers
         headers = [
-            'CE#', 'CE DATE', 'DESCRIPTION', 'Year', 'Month', 'BILLED',
+            'CE#', 'SO REFERENCE', 'CE DATE', 'DESCRIPTION', 'Year', 'Month', 'BILLED',
             'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
             'TOTAL', 'CE STATUS', 'PER CSD', 'VARIANCE',
             f'COST TO CLIENT - {cost_to_client_month}', 'FOR REVENUE ADJUSTMENT', 'REMARKS'
@@ -1135,32 +1200,37 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # Write data rows
         for ce_code in sorted(ces_data.keys()):
             ce_data = ces_data[ce_code]
-            amounts = self._calculate_amounts_by_type(ce_data['lines'], report_month)
-            
+            amounts = self._calculate_amounts_by_type(
+                ce_data['lines'], report_month)
+
             # Calculate billed amount for this CE's sales orders
-            billed_amount = self._calculate_billed_amount(ce_data['sales_orders'], report_month)
+            billed_amount = self._calculate_billed_amount(
+                ce_data['sales_orders'], report_month)
 
             sheet.write(row, 0, ce_code, formats['centered'])
 
-            if ce_data['ce_date']:
-                sheet.write(row, 1, ce_data['ce_date'], formats['date'])
-            else:
-                sheet.write(row, 1, '', formats['centered'])
+            # Write SO Reference
+            sheet.write(row, 1, ce_data['so_reference'], formats['centered'])
 
-            sheet.write(row, 2, ce_data['description'], formats['normal'])
+            if ce_data['ce_date']:
+                sheet.write(row, 2, ce_data['ce_date'], formats['date'])
+            else:
+                sheet.write(row, 2, '', formats['centered'])
+
+            sheet.write(row, 3, ce_data['description'], formats['normal'])
 
             if ce_data['year']:
-                sheet.write(row, 3, ce_data['year'], formats['centered'])
-            else:
-                sheet.write(row, 3, '', formats['centered'])
-
-            if ce_data['month']:
-                sheet.write(row, 4, ce_data['month'], formats['centered'])
+                sheet.write(row, 4, ce_data['year'], formats['centered'])
             else:
                 sheet.write(row, 4, '', formats['centered'])
 
+            if ce_data['month']:
+                sheet.write(row, 5, ce_data['month'], formats['centered'])
+            else:
+                sheet.write(row, 5, '', formats['centered'])
+
             # Write BILLED amount
-            sheet.write(row, 5, billed_amount, formats['currency_negative'])
+            sheet.write(row, 6, billed_amount, formats['currency_negative'])
 
             # Apply reversal OB fallback for this CE.
             # Try the CE code first, then fall back to x_studio_old_ce
@@ -1185,34 +1255,38 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 manual_reversal_val = rev_ob['manual_reversal']
             manual_reversal_val -= rev_ob.get('manual_reversal_adjustment', 0)
 
-            sheet.write(row, 6, amounts['system_accrual'], formats['currency_negative'])
-            sheet.write(row, 7, system_reversal_val, formats['currency_negative'])
-            sheet.write(row, 8, amounts['manual_accrual'], formats['currency_negative'])
-            sheet.write(row, 9, manual_reversal_val, formats['currency_negative'])
+            sheet.write(row, 7, amounts['system_accrual'],
+                        formats['currency_negative'])
+            sheet.write(row, 8, system_reversal_val,
+                        formats['currency_negative'])
+            sheet.write(row, 9, amounts['manual_accrual'],
+                        formats['currency_negative'])
+            sheet.write(row, 10, manual_reversal_val,
+                        formats['currency_negative'])
 
-            # Total formula (includes BILLED + accruals/reversals: F+G+H+I+J which is columns 5-9)
+            # Total formula (includes BILLED + accruals/reversals: G+H+I+J+K which is columns 6-10)
             excel_row = row + 1
             sheet.write_formula(
-                row, 10, f'=F{excel_row}+G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}', formats['currency'])
+                row, 11, f'=G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}', formats['currency'])
 
-            sheet.write(row, 11, ce_data['ce_status'], formats['centered'])
+            sheet.write(row, 12, ce_data['ce_status'], formats['centered'])
 
             # PER CSD - empty for user input
-            sheet.write(row, 12, '', formats['currency'])
+            sheet.write(row, 13, '', formats['currency'])
 
-            # VARIANCE formula: Total - Per CSD (K - M which is 10 - 12)
+            # VARIANCE formula: Total - Per CSD (L - N which is 11 - 13)
             sheet.write_formula(
-                row, 13, f'=K{excel_row}-M{excel_row}', formats['currency'])
+                row, 14, f'=L{excel_row}-N{excel_row}', formats['currency'])
 
             # COST TO CLIENT - empty for user input
-            sheet.write(row, 14, '', formats['currency'])
+            sheet.write(row, 15, '', formats['currency'])
 
-            # FOR REVENUE ADJUSTMENT formula: Variance - Cost to Client (N - O which is 13 - 14)
+            # FOR REVENUE ADJUSTMENT formula: Variance - Cost to Client (O - P which is 14 - 15)
             sheet.write_formula(
-                row, 15, f'=N{excel_row}-O{excel_row}', formats['currency'])
+                row, 16, f'=O{excel_row}-P{excel_row}', formats['currency'])
 
             # REMARKS - empty for user input
-            sheet.write(row, 16, '', formats['normal'])
+            sheet.write(row, 17, '', formats['normal'])
 
             row += 1
 
@@ -1246,15 +1320,14 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         })
 
         # Empty cells before TOTAL label
-        for col in range(0, 4):
-            sheet.write(total_row, col, '', formats['section_header_no_border'])
+        for col in range(0, 5):
+            sheet.write(total_row, col, '',
+                        formats['section_header_no_border'])
 
         # TOTAL label
-        sheet.write(total_row, 4, 'TOTAL', bold_with_border)
+        sheet.write(total_row, 5, 'TOTAL', bold_with_border)
 
         # Sum formulas for monetary columns
-        sheet.write_formula(
-            total_row, 5, f'=SUM(F{data_start_row + 1}:F{total_row})', currency_negative_bold_format)
         sheet.write_formula(
             total_row, 6, f'=SUM(G{data_start_row + 1}:G{total_row})', currency_negative_bold_format)
         sheet.write_formula(
@@ -1264,28 +1337,30 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.write_formula(
             total_row, 9, f'=SUM(J{data_start_row + 1}:J{total_row})', currency_negative_bold_format)
         sheet.write_formula(
-            total_row, 10, f'=SUM(K{data_start_row + 1}:K{total_row})', currency_bold_format)
-        
+            total_row, 10, f'=SUM(K{data_start_row + 1}:K{total_row})', currency_negative_bold_format)
+        sheet.write_formula(
+            total_row, 11, f'=SUM(L{data_start_row + 1}:L{total_row})', currency_bold_format)
+
         # Empty CE Status cell
-        sheet.write(total_row, 11, '', formats['section_header_no_border'])
-        
+        sheet.write(total_row, 12, '', formats['section_header_no_border'])
+
         # Sum for PER CSD
         sheet.write_formula(
-            total_row, 12, f'=SUM(M{data_start_row + 1}:M{total_row})', currency_bold_format)
-        
+            total_row, 13, f'=SUM(N{data_start_row + 1}:N{total_row})', currency_bold_format)
+
         # Sum for VARIANCE
         sheet.write_formula(
-            total_row, 13, f'=SUM(N{data_start_row + 1}:N{total_row})', currency_bold_format)
-        
+            total_row, 14, f'=SUM(O{data_start_row + 1}:O{total_row})', currency_bold_format)
+
         # Sum for COST TO CLIENT
         sheet.write_formula(
-            total_row, 14, f'=SUM(O{data_start_row + 1}:O{total_row})', currency_bold_format)
-        
+            total_row, 15, f'=SUM(P{data_start_row + 1}:P{total_row})', currency_bold_format)
+
         # Sum for FOR REVENUE ADJUSTMENT
         sheet.write_formula(
-            total_row, 15, f'=SUM(P{data_start_row + 1}:P{total_row})', currency_bold_format)
-        
+            total_row, 16, f'=SUM(Q{data_start_row + 1}:Q{total_row})', currency_bold_format)
+
         # Empty REMARKS cell
-        sheet.write(total_row, 16, '', formats['section_header_no_border'])
+        sheet.write(total_row, 17, '', formats['section_header_no_border'])
 
         return True

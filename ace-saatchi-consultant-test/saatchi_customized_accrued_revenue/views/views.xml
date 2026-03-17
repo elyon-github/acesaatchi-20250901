@@ -116,6 +116,7 @@
                         </group>
                          <group>
                             <field name="journal_id" readonly="state not in ['draft']"/>
+                            <field name="keep_foreign_currency" readonly="state not in ['draft']"/>
                             <field name="accrual_account_id" readonly="state not in ['draft']"/>
                             <field name="date" readonly="state not in ['draft']"/>
                             <field name="reversal_date" readonly="state not in ['draft']"/>

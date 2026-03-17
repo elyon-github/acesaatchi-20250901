@@ -82,6 +82,14 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
         """
     )
 
+    keep_foreign_currency = fields.Boolean(
+        string="Keep Foreign Currency",
+        default=False,
+        help="When unchecked (default), foreign currency amounts (e.g. USD) are automatically converted "
+             "to the company currency (PHP) using the Old CE Date or Order Date as the conversion date. "
+             "When checked, amounts remain in the original foreign currency on the accrual record."
+    )
+
     # ========== Onchange Methods ==========
 
     @api.onchange('accrual_date')
@@ -126,7 +134,8 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
 
         # Create new lines directly in DB
         for so in potential_sos:
-            amount_total = so._calculate_accrual_amount(accrual_date=self.accrual_date)
+            amount_total = so._calculate_accrual_amount(
+                accrual_date=self.accrual_date)
             if not amount_total:
                 continue
             has_duplicate = so in duplicate_sos
@@ -401,7 +410,8 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                     accrual_date=self.accrual_date,
                     reversal_date=self.reversal_date,
                     is_adjustment=False,
-                    is_system_generated=is_system
+                    is_system_generated=is_system,
+                    keep_foreign_currency=self.keep_foreign_currency
                 )
 
                 if result:
@@ -474,6 +484,7 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                     reversal_date=self.reversal_date,
                     is_adjustment=False,
                     is_system_generated=False,
+                    keep_foreign_currency=self.keep_foreign_currency,
                 )
 
                 if result:
@@ -558,7 +569,8 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                     accrual_date=self.accrual_date,
                     reversal_date=self.reversal_date,
                     is_adjustment=False,
-                    is_system_generated=False
+                    is_system_generated=False,
+                    keep_foreign_currency=self.keep_foreign_currency
                 )
 
                 if result:
@@ -640,7 +652,8 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                     accrual_date=self.accrual_date,
                     reversal_date=False,
                     is_adjustment=True,
-                    is_system_generated=False
+                    is_system_generated=False,
+                    keep_foreign_currency=self.keep_foreign_currency
                 )
 
                 if result:
@@ -694,7 +707,7 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
     """
     _name = 'saatchi.accrued_revenue.wizard.line'
     _description = 'Accrued Revenue Wizard Line'
-    _order = 'has_existing_accrual desc, sale_order_id'
+    _order = 'create_accrual desc, has_existing_accrual desc, sale_order_id'
 
     wizard_id = fields.Many2one(
         'saatchi.accrued_revenue.wizard',
@@ -722,6 +735,24 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
     ce_code = fields.Char(
         string="CE Code",
         related='sale_order_id.x_ce_code',
+        readonly=True,
+    )
+
+    old_ce_code = fields.Char(
+        string="Old CE #",
+        related='sale_order_id.x_studio_old_ce',
+        readonly=True,
+    )
+
+    old_ce_date = fields.Date(
+        string="Old CE Date",
+        related='sale_order_id.x_studio_old_ce_date',
+        readonly=True,
+    )
+
+    create_date = fields.Datetime(
+        string="Created",
+        related='sale_order_id.create_date',
         readonly=True,
     )
 

@@ -41,6 +41,8 @@
                             <field name="reversal_date" 
                                    help="First day of the next period for auto-reversal"
                                    invisible="accrual_scenario == 'scenario_3'"/>
+                            <field name="keep_foreign_currency"
+                                   help="If unchecked, foreign currency amounts will be converted to company currency (PHP) using the Old CE Date or Order Date as conversion date"/>
                         </group>
                         <group>
                             <!-- Special Case Mode (hidden, controlled by context) -->
@@ -143,23 +145,28 @@
                                            widget="boolean_toggle"
                                            string="Select" force_save="1" readonly="0"/>
                                     
+                                    <!-- Customer Information -->
+                                    <field name="partner_id" 
+                                           readonly="1"
+                                           string="Customer"/>
+
                                     <!-- Sale Order Reference -->
                                     <field name="sale_order_id" 
                                            readonly="1"
                                            string="Sale Order"/>
 
-                                    <!-- CE Reference and Status -->
+                                    <!-- CE Code -->
                                     <field name="ce_code" 
                                            readonly="1"
-                                           string="CE Code"/>
+                                           string="CE#"/>
 
-                            
-                                    <!-- Customer Information -->
-                                    <field name="partner_id" 
+                                    <!-- Old CE # -->
+                                    <field name="old_ce_code"
                                            readonly="1"
-                                           string="Customer"/>
+                                           string="Old CE#"
+                                           optional="show"/>
                                     
-                                    
+                                    <!-- Status -->
                                     <field name="ce_status" 
                                            readonly="1"
                                            string="Status"
@@ -167,6 +174,18 @@
                                            decoration-success="ce_status in ['signed', 'billable']"
                                            decoration-info="ce_status == 'for_client_signature'"
                                            decoration-muted="ce_status in ['closed', 'cancelled']"/>
+
+                                    <!-- Created -->
+                                    <field name="create_date"
+                                           readonly="1"
+                                           string="Created"
+                                           optional="hide"/>
+
+                                    <!-- Old CE Date -->
+                                    <field name="old_ce_date"
+                                           readonly="1"
+                                           string="Old CE Date"
+                                           optional="hide"/>
                                     
                                     <!-- Financial Amounts - Right Side -->
                                     <field name="existing_accrual_total"

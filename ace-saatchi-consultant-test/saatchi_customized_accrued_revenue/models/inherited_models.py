@@ -82,16 +82,25 @@ class SaleOrder(models.Model):
 
         # ── Standard: signed/billable SOs ──
         # Only include SOs whose effective date <= accrual_date.
-        # Use x_studio_old_ce_date if set, otherwise fall back to date_order.
-        # When no x_studio_old_ce_date, also check create_date <= accrual_date.
+        # Priority: old_ce_date > create_date (when old CE# exists) > date_order
         eligible_sos = self.search([
             ('state', '=', 'sale'),
             ('x_ce_status', 'in', ['signed', 'billable']),
             ('x_ce_code', '!=', False),
             '|',
-                '&', ('x_studio_old_ce_date', '!=', False), ('x_studio_old_ce_date', '<=', accrual_date),
-                '&', ('x_studio_old_ce_date', '=', False), 
-                     '&', ('date_order', '<=', accrual_date), ('create_date', '<=', accrual_date),
+            # Case 1: old CE# AND old CE date exist → use old CE date
+            '&', ('x_studio_old_ce', '!=', False),
+            '&', ('x_studio_old_ce_date', '!=', False),
+                 ('x_studio_old_ce_date', '<=', accrual_date),
+            '|',
+            # Case 2: old CE# exists but no old CE date → use create_date
+            '&', ('x_studio_old_ce', '!=', False),
+            '&', ('x_studio_old_ce_date', '=', False),
+                 ('create_date', '<=', accrual_date),
+            # Case 3: no old CE# → use date_order AND create_date (ignore old CE date)
+            '&', ('x_studio_old_ce', '=', False),
+            '&', ('date_order', '<=', accrual_date),
+                 ('create_date', '<=', accrual_date),
         ])
 
         for so in eligible_sos:
@@ -113,9 +122,19 @@ class SaleOrder(models.Model):
             ('x_ce_status', '=', 'for_client_signature'),
             ('x_ce_code', '!=', False),
             '|',
-                '&', ('x_studio_old_ce_date', '!=', False), ('x_studio_old_ce_date', '<=', accrual_date),
-                '&', ('x_studio_old_ce_date', '=', False), 
-                     '&', ('date_order', '<=', accrual_date), ('create_date', '<=', accrual_date),
+            # Case 1: old CE# AND old CE date exist → use old CE date
+            '&', ('x_studio_old_ce', '!=', False),
+            '&', ('x_studio_old_ce_date', '!=', False),
+                 ('x_studio_old_ce_date', '<=', accrual_date),
+            '|',
+            # Case 2: old CE# exists but no old CE date → use create_date
+            '&', ('x_studio_old_ce', '!=', False),
+            '&', ('x_studio_old_ce_date', '=', False),
+                 ('create_date', '<=', accrual_date),
+            # Case 3: no old CE# → use date_order AND create_date (ignore old CE date)
+            '&', ('x_studio_old_ce', '=', False),
+            '&', ('date_order', '<=', accrual_date),
+                 ('create_date', '<=', accrual_date),
         ])
 
         if client_sig_sos:
@@ -195,7 +214,8 @@ class SaleOrder(models.Model):
             if 'first_of_accrual_month' not in dir():
                 first_of_accrual_month = accrual_date.replace(day=1)
                 prev_month_end = first_of_accrual_month - relativedelta(days=1)
-            prev_month_start = (first_of_accrual_month - relativedelta(months=1))
+            prev_month_start = (first_of_accrual_month -
+                                relativedelta(months=1))
 
             # Reuse accrual_config from Tier 1 if available
             if 'accrual_config' not in dir():
@@ -223,7 +243,8 @@ class SaleOrder(models.Model):
                     ce_code = line.x_ce_code or ''
                     if ce_code:
                         norm = self._normalize_ce_code_for_match(ce_code)
-                        prev_month_ce_balances[norm] = prev_month_ce_balances.get(norm, 0.0) + (line.debit or 0) - (line.credit or 0)
+                        prev_month_ce_balances[norm] = prev_month_ce_balances.get(
+                            norm, 0.0) + (line.debit or 0) - (line.credit or 0)
 
             # Also check opening balance as fallback for CEs with no DB history
             cutoff_date = accrual_config.opening_balance_cutoff_date if accrual_config else False
@@ -253,8 +274,10 @@ class SaleOrder(models.Model):
                     # Check previous month ending balance > 0
                     old_ce = getattr(so, 'x_studio_old_ce', '') or ''
                     ce_code_for_balance = so.x_ce_code or ''
-                    norm_old_ce = self._normalize_ce_code_for_match(old_ce) if old_ce else ''
-                    norm_ce = self._normalize_ce_code_for_match(ce_code_for_balance) if ce_code_for_balance else ''
+                    norm_old_ce = self._normalize_ce_code_for_match(
+                        old_ce) if old_ce else ''
+                    norm_ce = self._normalize_ce_code_for_match(
+                        ce_code_for_balance) if ce_code_for_balance else ''
 
                     # Try DB balance first (old CE or regular CE)
                     balance = prev_month_ce_balances.get(norm_old_ce, None)
@@ -404,7 +427,7 @@ class SaleOrder(models.Model):
 
         return amount_total
 
-    def action_create_custom_accrued_revenue(self, is_override=False, accrual_date=False, reversal_date=False, is_adjustment=False, is_system_generated=True):
+    def action_create_custom_accrued_revenue(self, is_override=False, accrual_date=False, reversal_date=False, is_adjustment=False, is_system_generated=True, keep_foreign_currency=False):
         """
         Create accrued revenue entry for this sale order
 
@@ -418,6 +441,10 @@ class SaleOrder(models.Model):
         Args:
             is_override: If True, skip validation (Scenario 1: Manual Accrue)
             accrual_date: Custom accrual date
+            reversal_date: Custom reversal date
+            is_adjustment: If True, create adjustment entry (Scenario 3 - NO auto-reversal)
+            is_system_generated: If True, marks accrual as system generated
+            keep_foreign_currency: If False (default), convert foreign currency to company currency
             reversal_date: Custom reversal date
             is_adjustment: If True, create adjustment entry (Scenario 3 - NO auto-reversal)
 
@@ -439,61 +466,88 @@ class SaleOrder(models.Model):
         # if not reversal_date:
         #     reversal_date = self.env['saatchi.accrued_revenue']._default_reversal_date()
 
+        # Determine if we should convert to company currency
+        company_currency = self.company_id.currency_id
+        so_currency = self.currency_id
+        should_convert = not keep_foreign_currency and so_currency != company_currency
+
+        # Determine conversion date: Old CE Date > Create Date (if old CE# exists) > Order Date > Accrual Date
+        conversion_date = accrual_date
+        if should_convert:
+            old_ce_code = getattr(self, 'x_studio_old_ce', False)
+            old_ce_date = getattr(self, 'x_studio_old_ce_date', False) if old_ce_code else False
+            if old_ce_code and old_ce_date:
+                conversion_date = old_ce_date
+            elif old_ce_code and self.create_date:
+                # Old CE# exists but no old CE date → use create_date
+                conversion_date = self.create_date.date() if hasattr(self.create_date, 'date') else self.create_date
+            elif self.date_order:
+                conversion_date = self.date_order
+
+        # Use company currency if converting, otherwise SO currency
+        record_currency = company_currency if should_convert else so_currency
+
         # Create accrued revenue record
         accrued_revenue = self.env['saatchi.accrued_revenue'].with_context(default_company_id=self.company_id.id
-        ).create({
-            'x_related_ce_id': self.id,
-            'currency_id': self.currency_id.id,
-            'date': accrual_date,
-            'reversal_date': reversal_date,
-            'is_adjustment_entry': is_adjustment,
-            'x_accrual_system_generated': is_system_generated
-        })
+                                                                           ).create({
+                                                                               'x_related_ce_id': self.id,
+                                                                               'currency_id': record_currency.id,
+                                                                               'date': accrual_date,
+                                                                               'reversal_date': reversal_date,
+                                                                               'is_adjustment_entry': is_adjustment,
+                                                                               'x_accrual_system_generated': is_system_generated,
+                                                                               'keep_foreign_currency': keep_foreign_currency,
+                                                                           })
 
         if is_adjustment:
             # Scenario 3: Create adjustment entry (NO auto-reversal)
-            result = self._create_adjustment_entry_lines(accrued_revenue)
+            result = self._create_adjustment_entry_lines(
+                accrued_revenue, should_convert, conversion_date)
         else:
             # Normal or Override: Create lines from SO (with auto-reversal)
-            result = self._create_normal_accrual_lines(accrued_revenue)
+            result = self._create_normal_accrual_lines(
+                accrued_revenue, should_convert, conversion_date)
 
         # Return the result (accrual ID or False)
         return result
 
-    def _create_normal_accrual_lines(self, accrued_revenue):
+    def _create_normal_accrual_lines(self, accrued_revenue, should_convert=False, conversion_date=False):
         """
         Create normal accrual lines from SO lines
-        
+
         Structure:
         - For positive amounts: Cr. Revenue | Dr. Accrued Revenue
         - For negative amounts (returns): Dr. Revenue | Cr. Accrued Revenue
         - Creates automatic reversal entry
-        
+
         Args:
             accrued_revenue: The accrued revenue record
-            
+            should_convert: If True, convert foreign currency amounts to company currency
+            conversion_date: Date to use for currency conversion
+
         Returns:
             int: Accrual record ID if successful, False otherwise
         """
         total_eligible_for_accrue = 0
         lines_created = 0
-        
+
         _logger.info(f"Starting accrual creation for SO {self.name}")
-        
+
         # Get the target company from accrued_revenue
         target_company = accrued_revenue.company_id
 
         # Use accrual date to filter invoices for accurate qty_invoiced
         accrual_date = accrued_revenue.date
-        
+
         for line in self.order_line:
             if line.display_type:
                 continue
-            
+
             if not self._is_agency_charges_category(line.product_template_id):
-                _logger.debug(f"Skipping line {line.name} - not Agency Charges category")
+                _logger.debug(
+                    f"Skipping line {line.name} - not Agency Charges category")
                 continue
-            
+
             # Compute qty_invoiced filtered by accrual date
             if accrual_date:
                 qty_invoiced = 0.0
@@ -514,31 +568,46 @@ class SaleOrder(models.Model):
 
             accrued_qty = line.product_uom_qty - qty_invoiced
             if accrued_qty == 0:  # Changed from <= to == to allow negative
-                _logger.debug(f"Skipping line {line.name} - no accrued qty (qty: {line.product_uom_qty}, invoiced: {qty_invoiced})")
+                _logger.debug(
+                    f"Skipping line {line.name} - no accrued qty (qty: {line.product_uom_qty}, invoiced: {qty_invoiced})")
                 continue
-            
+
             accrued_amount = accrued_qty * line.price_unit
-            
+
+            # Convert to company currency if needed
+            if should_convert:
+                accrued_amount = self.currency_id._convert(
+                    accrued_amount,
+                    self.company_id.currency_id,
+                    self.company_id,
+                    conversion_date or accrued_revenue.date
+                )
+                line_currency = self.company_id.currency_id
+            else:
+                line_currency = line.currency_id
+
             # Determine analytic distribution with fallback logic
             analytic_distribution = line.analytic_distribution or {}
-            
+
             # Fallback to SO level analytic distribution
             if not analytic_distribution and hasattr(self, 'analytic_distribution') and self.analytic_distribution:
                 analytic_distribution = self.analytic_distribution
-            
+
             # Default to analytic account ID 2 if still no distribution found
             if not analytic_distribution:
                 analytic_distribution = {2: 100}
-                _logger.debug(f"Using default analytic account (ID: 2) for line {line.name}")
-            
+                _logger.debug(
+                    f"Using default analytic account (ID: 2) for line {line.name}")
+
             # Get income account from product
             template_income_account = line.product_id.property_account_income_id or \
                 line.product_id.categ_id.property_account_income_categ_id
-            
+
             if not template_income_account:
-                _logger.warning(f"No income account found for line {line.name} in SO {self.name}")
+                _logger.warning(
+                    f"No income account found for line {line.name} in SO {self.name}")
                 continue
-            
+
             # Find the equivalent account in the target company
             if target_company in template_income_account.company_ids:
                 # Account is valid for target company
@@ -550,7 +619,7 @@ class SaleOrder(models.Model):
                     ('company_ids', 'in', target_company.id),
                     ('deprecated', '=', False)
                 ], limit=1)
-                
+
                 if not income_account:
                     # Fallback: try by name
                     income_account = self.env['account.account'].sudo().search([
@@ -558,14 +627,14 @@ class SaleOrder(models.Model):
                         ('company_ids', 'in', target_company.id),
                         ('deprecated', '=', False)
                     ], limit=1)
-                
+
                 if not income_account:
                     _logger.warning(
                         f"No equivalent income account found for line {line.name} in company {target_company.name}. "
                         f"Template account: {template_income_account.code} - {template_income_account.name}"
                     )
                     continue
-            
+
             # Handle negative amounts (returns/adjustments)
             if accrued_amount < 0:
                 # Negative accrual: Dr. Revenue (reverse the credit)
@@ -577,7 +646,7 @@ class SaleOrder(models.Model):
                     'label': f'{effective_ce} - {line.name}',
                     'debit': abs(accrued_amount),  # Debit the revenue account
                     'credit': 0.0,
-                    'currency_id': line.currency_id.id,
+                    'currency_id': line_currency.id,
                     'analytic_distribution': analytic_distribution,
                 })
             else:
@@ -590,36 +659,41 @@ class SaleOrder(models.Model):
                     'label': f'{effective_ce} - {line.name}',
                     'credit': accrued_amount,
                     'debit': 0.0,
-                    'currency_id': line.currency_id.id,
+                    'currency_id': line_currency.id,
                     'analytic_distribution': analytic_distribution,
                 })
-            
+
             total_eligible_for_accrue += accrued_amount  # Keep the sign
             lines_created += 1
-            _logger.debug(f"Created line for {line.name}, amount: {accrued_amount}")
-        
+            _logger.debug(
+                f"Created line for {line.name}, amount: {accrued_amount}")
+
         if lines_created == 0:
             accrued_revenue.unlink()
-            _logger.warning(f"No eligible lines found for accrual in SO {self.name}")
+            _logger.warning(
+                f"No eligible lines found for accrual in SO {self.name}")
             return False
-        
+
         # Create Total Accrued line (will be computed by update_total_accrued_line)
         self.env['saatchi.accrued_revenue_lines'].create({
             'accrued_revenue_id': accrued_revenue.id,
             'label': 'Total Accrued',
-            'currency_id': self.currency_id.id,
+            'currency_id': accrued_revenue.currency_id.id,
             'account_id': accrued_revenue.accrual_account_id.id,
             'debit': 0.0,
             'credit': 0.0,
         })
-        
-        accrued_revenue.write({'ce_original_total_amount': total_eligible_for_accrue})
-        
-        _logger.info(f"✓ Created accrual ID {accrued_revenue.id} for SO {self.name} with {lines_created} lines, total: {total_eligible_for_accrue}")
-        
+
+        # Store original total (already converted if should_convert was True)
+        accrued_revenue.write(
+            {'ce_original_total_amount': total_eligible_for_accrue})
+
+        _logger.info(
+            f"✓ Created accrual ID {accrued_revenue.id} for SO {self.name} with {lines_created} lines, total: {total_eligible_for_accrue}")
+
         return accrued_revenue.id
 
-    def _create_adjustment_entry_lines(self, accrued_revenue):
+    def _create_adjustment_entry_lines(self, accrued_revenue, should_convert=False, conversion_date=False):
         """
         Create adjustment entry lines (Scenario 3)
 
@@ -631,19 +705,33 @@ class SaleOrder(models.Model):
 
         Args:
             accrued_revenue: The accrued revenue record
+            should_convert: If True, convert foreign currency amounts to company currency
+            conversion_date: Date to use for currency conversion
 
         Returns:
             int: Accrual record ID if successful, False otherwise
         """
         # Calculate total accrual amount as default suggestion
         # Use accrual date from the record to filter invoices by date
-        total_accrual_amount = self._calculate_accrual_amount(accrual_date=accrued_revenue.date)
+        total_accrual_amount = self._calculate_accrual_amount(
+            accrual_date=accrued_revenue.date)
 
         if total_accrual_amount <= 0:
             # Still create the entry but with 0 amount (user will fill in manually)
             total_accrual_amount = 0
             _logger.info(
                 f"Creating adjustment entry for SO {self.name} with 0 default amount (user will edit)")
+
+        # Convert to company currency if needed
+        if should_convert and total_accrual_amount > 0:
+            total_accrual_amount = self.currency_id._convert(
+                total_accrual_amount,
+                self.company_id.currency_id,
+                self.company_id,
+                conversion_date or accrued_revenue.date
+            )
+
+        line_currency = self.company_id.currency_id if should_convert else self.currency_id
 
         # Get Digital Income account (ID: 5787)
         digital_income_account = accrued_revenue.digital_income_account_id
@@ -664,7 +752,7 @@ class SaleOrder(models.Model):
             'label': 'Digital Income - Adjustment',
             'debit': total_accrual_amount,
             'credit': 0.0,
-            'currency_id': self.currency_id.id,
+            'currency_id': line_currency.id,
             'analytic_distribution': analytic_distribution,
         })
 
@@ -672,7 +760,7 @@ class SaleOrder(models.Model):
         self.env['saatchi.accrued_revenue_lines'].create({
             'accrued_revenue_id': accrued_revenue.id,
             'label': 'Total Accrued',
-            'currency_id': self.currency_id.id,
+            'currency_id': line_currency.id,
             'account_id': accrued_revenue.accrual_account_id.id,
             'debit': 0.0,
             'credit': 0.0,
@@ -815,15 +903,14 @@ class AccountMove(models.Model):
                 move.x_type_of_entry = f'reversal_{suffix}'
             else:
                 move.x_type_of_entry = f'accrued_{suffix}'
-                
-                
+
     x_sales_order = fields.Many2one(
         'sale.order',
         string="Sales Order",
         compute="_compute_sales_order",
         store=True
     )
-    
+
     @api.depends('invoice_line_ids.sale_line_ids',
                  'invoice_line_ids.sale_line_ids.order_id',
                  'x_related_custom_accrued_record',
@@ -832,11 +919,11 @@ class AccountMove(models.Model):
         """Compute linked sale order"""
         for move in self:
             so = False
-            
+
             # Priority 1: Get from accrued record
             if move.x_related_custom_accrued_record and move.x_related_custom_accrued_record.x_related_ce_id:
                 so = move.x_related_custom_accrued_record.x_related_ce_id
-            
+
             # Priority 2: Get from invoice lines
             elif move.invoice_line_ids:
                 # Try to get from sale lines first
@@ -845,8 +932,9 @@ class AccountMove(models.Model):
                     so = sale_lines[0].order_id
                 else:
                     # Fallback to purchase lines
-                    po_sale_lines = move.invoice_line_ids.mapped('purchase_line_id')
-                    
+                    po_sale_lines = move.invoice_line_ids.mapped(
+                        'purchase_line_id')
+
                     if po_sale_lines:
                         # Safely check if x_studio_sales_order exists and has a value
                         first_po_line = po_sale_lines[0]
@@ -857,7 +945,7 @@ class AccountMove(models.Model):
 
 class AccountMoveLine(models.Model):
     _inherit = "account.move.line"
-    
+
     x_ce_code = fields.Char(
         string="CE Code",
         compute="_compute_ce_fields",
@@ -866,7 +954,6 @@ class AccountMoveLine(models.Model):
         readonly=False
     )
 
-        
     x_sales_order = fields.Many2one(
         'sale.order',
         string="Sales Order",
@@ -885,7 +972,7 @@ class AccountMoveLine(models.Model):
         string="Sales Team",
         store=True,
         related='x_sales_order.team_id')
-        
+
     x_client_product_ce_code = fields.Many2one(
         'product.template',
         store=True,
@@ -898,7 +985,7 @@ class AccountMoveLine(models.Model):
         help="Contract Estimate date from sale order",
         readonly=False
     )
-    
+
     x_ce_status = fields.Selection(
         [
             ('for_client_signature', 'For Client Signature'),
@@ -911,32 +998,32 @@ class AccountMoveLine(models.Model):
         compute="_compute_ce_fields",
         store=True
     )
-    
+
     x_remarks = fields.Char(
         string="Remarks",
         help="Additional remarks for this journal entry line"
     )
-    
+
     x_reference = fields.Char(
         string="Reference",
         related='move_id.ref'
     )
-    
+
     x_is_reversal = fields.Boolean(
         string="Is Reversal Entry?",
         related='move_id.x_is_reversal'
     )
-    
+
     x_is_accrued_entry = fields.Boolean(
         string="Is Accrued Entry?",
         related='move_id.x_is_accrued_entry'
     )
-    
+
     x_is_adjustment_entry = fields.Boolean(
         string="Is Adjustment Entry?",
         related='move_id.x_is_accrued_entry'
     )
-    
+
     x_type_of_entry = fields.Selection(
         selection=[
             ('reversal_system', 'Reversal Entry - System'),
@@ -951,10 +1038,10 @@ class AccountMoveLine(models.Model):
         store=True,
         readonly=True
     )
-    
-    @api.depends('x_sales_order', 
+
+    @api.depends('x_sales_order',
                  'x_sales_order.x_ce_code',
-                 'x_sales_order.date_order', 
+                 'x_sales_order.date_order',
                  'x_sales_order.x_ce_status')
     def _compute_ce_fields(self):
         """Compute CE-related fields from linked sale order. Prioritizes old CE code and date over new."""
@@ -962,9 +1049,16 @@ class AccountMoveLine(models.Model):
             so = line.x_sales_order
             if so:
                 line.x_ce_code = so.x_studio_old_ce or so.x_ce_code
-                # Try to use old CE date if it exists (Studio field), fallback to date_order
-                old_ce_date = getattr(so, 'x_studio_old_ce_date', False)
-                line.x_ce_date = old_ce_date or so.date_order
+                # Use old CE date if it exists; leave blank if old CE# exists but date is missing
+                old_ce_code = getattr(so, 'x_studio_old_ce', False)
+                old_ce_date = getattr(so, 'x_studio_old_ce_date', False) if old_ce_code else False
+                if old_ce_code and old_ce_date:
+                    line.x_ce_date = old_ce_date
+                elif old_ce_code:
+                    # Old CE# exists but no old CE date → leave blank
+                    line.x_ce_date = False
+                else:
+                    line.x_ce_date = so.date_order
                 line.x_ce_status = so.x_ce_status
                 line.x_client_product_ce_code = so.x_client_product_ce_code.x_product_id.id if so.x_client_product_ce_code and so.x_client_product_ce_code.x_product_id else False
             else:
