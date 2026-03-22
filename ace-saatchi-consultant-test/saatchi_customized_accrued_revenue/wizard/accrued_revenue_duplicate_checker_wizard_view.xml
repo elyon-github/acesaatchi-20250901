@@ -42,7 +42,8 @@
                                    help="First day of the next period for auto-reversal"
                                    invisible="accrual_scenario == 'scenario_3'"/>
                             <field name="keep_foreign_currency"
-                                   help="If unchecked, foreign currency amounts will be converted to company currency (PHP) using the Old CE Date or Order Date as conversion date"/>
+                                   help="If unchecked, foreign currency amounts will be converted to company currency (PHP) using the Old CE Date or Order Date as conversion date"
+                                   groups="base.group_erp_manager"/>
                         </group>
                         <group>
                             <!-- Special Case Mode (hidden, controlled by context) -->
@@ -81,7 +82,7 @@
                                 <strong>Scenario 1:</strong> Create accruals bypassing status checks (use for non-standard SOs)
                             </li>
                             <li>
-                                <strong>Scenario 2:</strong> Cancel posted accruals and create new ones (corrects posted entries only)
+                                <strong>Scenario 2:</strong> Create adjustment entries with auto-reversal (adjusts existing accruals without cancelling them)
                             </li>
                             <li>
                                 <strong>Scenario 3:</strong> Create permanent adjustment entries with no reversal (requires existing accruals)
@@ -96,17 +97,17 @@
                         <span invisible="accrual_scenario != 'scenario_1'"> Accruals will be created regardless of SO status</span>
                         
                         <strong invisible="accrual_scenario != 'scenario_2'">Scenario 2:</strong>
-                        <span invisible="accrual_scenario != 'scenario_2'"> Posted accruals will be cancelled and replaced with new entries</span>
+                        <span invisible="accrual_scenario != 'scenario_2'"> Adjustment entries will be created alongside existing accruals (with auto-reversal)</span>
                         
                         <strong invisible="accrual_scenario != 'scenario_3'">Scenario 3:</strong>
                         <span invisible="accrual_scenario != 'scenario_3'"> Permanent adjustment entries will be created (no reversal). Edit amounts in draft before posting.</span>
                     </div>
                     <!-- Warning Banner for Scenario 2 -->
-                    <div class="alert alert-danger" 
+                    <div class="alert alert-warning" 
                          role="alert"
                          invisible="accrual_scenario != 'scenario_2' or not special_case_mode">
-                        <i class="fa fa-exclamation-triangle"/> 
-                        <strong>Warning:</strong> Scenario 2 will cancel existing posted accruals and their journal entries before creating replacements. This action cannot be undone.
+                        <i class="fa fa-info-circle"/> 
+                        <strong> Note:</strong> Scenario 2 creates adjustment entries alongside existing accruals. Existing posted entries will NOT be cancelled or modified.
                     </div>
                     
                     <!-- Warning Banner for Scenario 3 -->
@@ -125,7 +126,7 @@
                     <!-- Summary Banner -->
                     <div class="alert alert-warning mt-3" role="alert" invisible="not has_existing_accruals">
                         <i class="fa fa-exclamation-triangle"/> 
-                        <strong>Duplicate Alert:</strong> Selected sale orders have existing accruals for this period.
+                        <strong> Duplicate Alert:</strong> Selected sale orders have existing accruals for this period.
                         <span invisible="special_case_mode">Creating new entries will create duplicates.</span>
                         <span invisible="not special_case_mode">Your scenario will handle these automatically.</span>
                     </div>
@@ -153,7 +154,8 @@
                                     <!-- Sale Order Reference -->
                                     <field name="sale_order_id" 
                                            readonly="1"
-                                           string="Sale Order"/>
+                                           string="Sale Order"
+                                           optional="hide"/>
 
                                     <!-- CE Code -->
                                     <field name="ce_code" 
@@ -190,20 +192,31 @@
                                     <!-- Financial Amounts - Right Side -->
                                     <field name="existing_accrual_total"
                                            readonly="1"
-                                           string="Already Accrued"
-                                           optional="show"/>
+                                           string="Already Accrued"/>
                                     
                                     <field name="amount_total" 
                                            readonly="1" 
                                            sum="Total Amount"
-                                           string="Amount to Accrue"/>
+                                           string="Amount to Accrue"
+                                           optional="hide"/>
+
+                                    <!-- Adjustment fields - visible only for Scenario 2 & 3 -->
+                                    <field name="amount_left_to_accrue"
+                                           readonly="1"
+                                           string="Left to Accrue"
+                                           column_invisible="not parent.special_case_mode or parent.accrual_scenario == 'scenario_1'"/>
+
+                                    <field name="adjustment_amount"
+                                           string="Adjustment Amount"
+                                           sum="Total Adjustment"
+                                           column_invisible="not parent.special_case_mode or parent.accrual_scenario == 'scenario_1'"/>
                                     
                                     <!-- Duplicate Warning Indicator -->
                                     <field name="has_existing_accrual" 
                                            readonly="1" 
                                            widget="boolean_toggle"
                                            string="Has Existing"
-                                           optional="show"/>
+                                           optional="hide"/>
                                     
                                     <!-- Hidden Fields -->
                                     <field name="currency_id" 

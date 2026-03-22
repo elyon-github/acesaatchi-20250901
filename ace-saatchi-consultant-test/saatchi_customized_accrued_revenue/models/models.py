@@ -421,8 +421,8 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
         """
         # raise UserError('huh')
         for record in self:
-            # Adjustment entries don't have reversal entries
-            if record.is_adjustment_entry:
+            # Adjustment entries without reversal (Scenario 3)
+            if record.is_adjustment_entry and not record.related_reverse_accrued_entry:
                 if not record.related_accrued_entry:
                     record.state = 'draft'
                 elif record.related_accrued_entry.state == 'cancel':
@@ -432,7 +432,7 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
                 else:
                     record.state = 'draft'
             else:
-                # Normal accruals (with reversal)
+                # Normal accruals (with reversal) and Scenario 2 adjustment entries (with reversal)
                 if not record.related_accrued_entry and not record.related_reverse_accrued_entry:
                     record.state = 'draft'
                 elif record.related_accrued_entry and record.related_reverse_accrued_entry:
@@ -461,13 +461,15 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
             ce_display = record.effective_ce_code or record.ce_code or ''
             record.display_name = f'{so_name} | {ce_display}{suffix}'
 
-    @api.depends('line_ids.debit')
+    @api.depends('line_ids.debit', 'line_ids.credit')
     def _compute_total_amount_accrued(self):
-        """Calculate total debit amount from all credit lines (excluding Total Accrued)"""
+        """Calculate net accrued amount from 'Total Accrued' line (debit - credit).
+        Positive for normal accruals, negative for reducing adjustments."""
         for record in self:
-            debit_lines = record.line_ids.filtered(
+            total_line = record.line_ids.filtered(
                 lambda l: l.label == 'Total Accrued')
-            record.total_amount_accrued = sum(debit_lines.mapped('debit'))
+            record.total_amount_accrued = sum(
+                total_line.mapped('debit')) - sum(total_line.mapped('credit'))
 
     @api.depends('line_ids.credit')
     def _compute_total_debit_in_accrue_account(self):
@@ -915,10 +917,13 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
 
     def create_entries(self):
         """
-        Create accrual journal entries
+        Create or update accrual journal entries
 
         For normal accruals: Creates entry + automatic reversal
         For adjustment entries: Creates single entry (NO reversal)
+
+        If existing draft JEs are linked (after Reset to Draft),
+        updates them instead of creating new ones.
 
         Returns:
             dict: Action to open created journal entries
@@ -929,7 +934,7 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
             raise UserError(
                 _('Entries can only be created for records in "Draft" status.'))
 
-        if not self.is_adjustment_entry and self.reversal_date <= self.date:
+        if self.reversal_date and self.reversal_date <= self.date:
             raise UserError(_('Reversal date must be after accrual date.'))
 
         if not self.line_ids:
@@ -940,14 +945,66 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
             raise UserError(
                 _('Please specify a journal for the accrual entries.'))
 
-        # Create accrual entry
+        # ── Determine if we're updating existing draft JEs or creating new ──
+        existing_accrual = self.related_accrued_entry
+        update_mode = existing_accrual and existing_accrual.state == 'draft'
+
         move_vals = self._prepare_move_vals()
-        move = self.env['account.move'].create(move_vals)
+
+        if update_mode:
+            # UPDATE existing draft JE with new line amounts
+            new_line_commands = move_vals.pop('line_ids')
+            # Don't overwrite the back-link
+            move_vals.pop('x_related_custom_accrued_record', None)
+
+            # Delete old lines + add new lines in one write
+            delete_cmds = [(2, line.id, 0) for line in existing_accrual.line_ids]
+            existing_accrual.with_context(check_move_validity=False).write({
+                **move_vals,
+                'line_ids': delete_cmds + new_line_commands,
+            })
+            move = existing_accrual
+
+            # Cancel old draft reversal (if exists) — will be recreated fresh
+            if self.related_reverse_accrued_entry and \
+                    self.related_reverse_accrued_entry.state == 'draft':
+                old_reversal = self.related_reverse_accrued_entry
+                self.related_reverse_accrued_entry = False
+                old_reversal.button_cancel()
+                old_reversal.write({
+                    'x_related_custom_accrued_record': False,
+                })
+        else:
+            # CREATE new JE (original flow)
+            move = self.env['account.move'].create(move_vals)
+
+        # ── Lock-date guard: block if accrual date falls in a locked period ──
+        # Odoo's _post() silently shifts the JE date forward when it falls
+        # inside a locked period.  We check *before* posting so the user gets
+        # a clear error instead.  No manual cleanup is needed — raising
+        # UserError rolls back the entire DB transaction automatically.
+        lock_dates = move._get_violated_lock_dates(
+            move.date, move._affect_tax_report())
+        if lock_dates:
+            lock_info = self.env['res.company']._format_lock_dates(lock_dates)
+            raise UserError(_(
+                'Cannot post accrual entry dated %(date)s because it falls '
+                'within a locked period.\n\n'
+                'Lock date(s) in effect: %(lock_info)s\n\n'
+                'Please either adjust the Accrual Date on this record to a '
+                'date after the lock period, or ask your administrator to '
+                'move the lock date.',
+                date=self.date,
+                lock_info=lock_info,
+            ))
+
         move._post()
         self.related_accrued_entry = move.id
 
-        # Only create reversal for NORMAL accruals (not adjustment entries)
-        if not self.is_adjustment_entry:
+        # Create reversal for entries that have a reversal date
+        # (normal accruals and Scenario 2 adjustment entries have reversal dates;
+        #  Scenario 3 adjustment entries do NOT)
+        if self.reversal_date:
             reverse_move = move._reverse_moves(default_values_list=[{
                 'ref': _('Reversal of: %s', move.ref),
                 'name': '/',
@@ -956,6 +1013,24 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
                 # Pass through system flag
                 'x_accrual_system_generated': self.x_accrual_system_generated,
             }])
+
+            # ── Lock-date guard for reversal entry ──
+            rev_lock_dates = reverse_move._get_violated_lock_dates(
+                reverse_move.date, reverse_move._affect_tax_report())
+            if rev_lock_dates:
+                rev_lock_info = self.env['res.company']._format_lock_dates(
+                    rev_lock_dates)
+                raise UserError(_(
+                    'Cannot post reversal entry dated %(date)s because it '
+                    'falls within a locked period.\n\n'
+                    'Lock date(s) in effect: %(lock_info)s\n\n'
+                    'Please either adjust the Reversal Date on this record '
+                    'to a date after the lock period, or ask your '
+                    'administrator to move the lock date.',
+                    date=self.reversal_date,
+                    lock_info=rev_lock_info,
+                ))
+
             reverse_move._post()
             self.related_reverse_accrued_entry = reverse_move.id
 
@@ -963,11 +1038,19 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
 
         # Post message to sale order
         if self.x_related_ce_id:
-            if self.is_adjustment_entry:
+            if self.is_adjustment_entry and not self.reversal_date:
                 body = _(
                     'Adjustment entry created on %(date)s: %(accrual_entry)s',
                     date=self.date,
                     accrual_entry=move._get_html_link(),
+                )
+            elif self.is_adjustment_entry and self.reversal_date:
+                body = _(
+                    'Adjustment entry created on %(date)s: %(accrual_entry)s. '
+                    'And its reverse entry: %(reverse_entry)s.',
+                    date=self.date,
+                    accrual_entry=move._get_html_link(),
+                    reverse_entry=self.related_reverse_accrued_entry._get_html_link(),
                 )
             else:
                 body = _(
@@ -1151,6 +1234,59 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
             'view_mode': 'list,form',
             'domain': [('x_related_custom_accrued_record', '=', self.id)],
         }
+
+    def action_reset_to_draft(self):
+        """
+        Reset accrual from posted/cancelled back to draft state.
+        Moves linked journal entries from posted or cancelled to draft (editable).
+        """
+        self.ensure_one()
+
+        if self.state not in ('accrued', 'reversed', 'cancel'):
+            raise UserError(
+                _('Can only reset entries that are in "Accrued", "Reversed", or "Cancelled" state.'))
+
+        # Reset reversal first (must be undone before accrual)
+        if self.related_reverse_accrued_entry:
+            if self.related_reverse_accrued_entry.state in ('posted', 'cancel'):
+                self.related_reverse_accrued_entry.button_draft()
+
+        # Reset accrual entry
+        if self.related_accrued_entry:
+            if self.related_accrued_entry.state in ('posted', 'cancel'):
+                self.related_accrued_entry.button_draft()
+
+        self.message_post(
+            body=_('Accrual reset to draft. Journal entries moved to draft for editing.'),
+            subject=_('Reset to Draft'),
+        )
+        return True
+
+    def action_cancel_draft(self):
+        """
+        Cancel accrual and its linked draft journal entries.
+        Only works when state is draft and there are linked JEs.
+        """
+        self.ensure_one()
+
+        if self.state != 'draft':
+            raise UserError(_('Can only cancel from "Draft" state.'))
+
+        # Cancel draft reversal (if exists)
+        if self.related_reverse_accrued_entry and \
+                self.related_reverse_accrued_entry.state == 'draft':
+            self.related_reverse_accrued_entry.button_cancel()
+
+        # Cancel draft accrual entry
+        if self.related_accrued_entry and \
+                self.related_accrued_entry.state == 'draft':
+            self.related_accrued_entry.button_cancel()
+
+        self.message_post(
+            body=_('Accrual cancelled. Journal entries have been cancelled.'),
+            subject=_('Accrual Cancelled'),
+        )
+        return True
 
     def action_reset_and_cancel(self):
         """

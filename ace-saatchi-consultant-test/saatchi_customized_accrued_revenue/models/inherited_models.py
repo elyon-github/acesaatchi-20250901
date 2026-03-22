@@ -427,7 +427,7 @@ class SaleOrder(models.Model):
 
         return amount_total
 
-    def action_create_custom_accrued_revenue(self, is_override=False, accrual_date=False, reversal_date=False, is_adjustment=False, is_system_generated=True, keep_foreign_currency=False):
+    def action_create_custom_accrued_revenue(self, is_override=False, accrual_date=False, reversal_date=False, is_adjustment=False, is_system_generated=True, keep_foreign_currency=False, adjustment_amount=0):
         """
         Create accrued revenue entry for this sale order
 
@@ -442,11 +442,10 @@ class SaleOrder(models.Model):
             is_override: If True, skip validation (Scenario 1: Manual Accrue)
             accrual_date: Custom accrual date
             reversal_date: Custom reversal date
-            is_adjustment: If True, create adjustment entry (Scenario 3 - NO auto-reversal)
+            is_adjustment: If True, create adjustment entry
             is_system_generated: If True, marks accrual as system generated
             keep_foreign_currency: If False (default), convert foreign currency to company currency
-            reversal_date: Custom reversal date
-            is_adjustment: If True, create adjustment entry (Scenario 3 - NO auto-reversal)
+            adjustment_amount: Signed amount for adjustment entries (negative=reduce, positive=increase)
 
         Returns:
             int: Accrual record ID if successful, False otherwise
@@ -500,9 +499,10 @@ class SaleOrder(models.Model):
                                                                            })
 
         if is_adjustment:
-            # Scenario 3: Create adjustment entry (NO auto-reversal)
+            # Scenario 2/3: Create adjustment entry from wizard-provided amount
             result = self._create_adjustment_entry_lines(
-                accrued_revenue, should_convert, conversion_date)
+                accrued_revenue, should_convert, conversion_date,
+                adjustment_amount=adjustment_amount)
         else:
             # Normal or Override: Create lines from SO (with auto-reversal)
             result = self._create_normal_accrual_lines(
@@ -693,47 +693,47 @@ class SaleOrder(models.Model):
 
         return accrued_revenue.id
 
-    def _create_adjustment_entry_lines(self, accrued_revenue, should_convert=False, conversion_date=False):
+    def _create_adjustment_entry_lines(self, accrued_revenue, should_convert=False, conversion_date=False, adjustment_amount=0):
         """
-        Create adjustment entry lines (Scenario 3)
+        Create adjustment entry lines (Scenario 2 & 3)
 
-        Structure (only 2 lines, NO auto-reversal):
-        1. Dr. Digital Income (5787) - default calculated amount (user editable)
-        2. Cr. Total Accrued (1210) - matches Digital Income amount
-
-        This is a PERMANENT adjustment entry, NOT reversed automatically.
+        Sign convention:
+        - Negative amount (reduce accrual):
+            Dr. Digital Income  |  Cr. Accrued Revenue
+        - Positive amount (increase accrual):
+            Dr. Accrued Revenue  |  Cr. Digital Income
 
         Args:
             accrued_revenue: The accrued revenue record
             should_convert: If True, convert foreign currency amounts to company currency
             conversion_date: Date to use for currency conversion
+            adjustment_amount: Signed adjustment amount from wizard
+                               (negative = reduce accrual, positive = increase accrual)
 
         Returns:
             int: Accrual record ID if successful, False otherwise
         """
-        # Calculate total accrual amount as default suggestion
-        # Use accrual date from the record to filter invoices by date
-        total_accrual_amount = self._calculate_accrual_amount(
-            accrual_date=accrued_revenue.date)
-
-        if total_accrual_amount <= 0:
-            # Still create the entry but with 0 amount (user will fill in manually)
-            total_accrual_amount = 0
-            _logger.info(
-                f"Creating adjustment entry for SO {self.name} with 0 default amount (user will edit)")
+        # Use wizard-provided amount; fall back to calculated amount if zero
+        if not adjustment_amount:
+            adjustment_amount = -(self._calculate_accrual_amount(
+                accrual_date=accrued_revenue.date) or 0)
+            if not adjustment_amount:
+                _logger.info(
+                    f"Creating adjustment entry for SO {self.name} with 0 default amount")
 
         # Convert to company currency if needed
-        if should_convert and total_accrual_amount > 0:
-            total_accrual_amount = self.currency_id._convert(
-                total_accrual_amount,
+        if should_convert and adjustment_amount:
+            adjustment_amount = self.currency_id._convert(
+                adjustment_amount,
                 self.company_id.currency_id,
                 self.company_id,
                 conversion_date or accrued_revenue.date
             )
 
         line_currency = self.company_id.currency_id if should_convert else self.currency_id
+        abs_amount = abs(adjustment_amount)
 
-        # Get Digital Income account (ID: 5787)
+        # Get Digital Income account
         digital_income_account = accrued_revenue.digital_income_account_id
         if not digital_income_account:
             accrued_revenue.unlink()
@@ -745,18 +745,28 @@ class SaleOrder(models.Model):
         if hasattr(self, 'analytic_distribution') and self.analytic_distribution:
             analytic_distribution = self.analytic_distribution
 
-        # Line 1: Dr. Digital Income (user can edit this amount)
+        # Determine debit/credit based on sign
+        if adjustment_amount < 0:
+            # REDUCE accrual: Dr. Digital Income | Cr. Accrued Revenue
+            income_debit = abs_amount
+            income_credit = 0.0
+        else:
+            # INCREASE accrual: Dr. Accrued Revenue | Cr. Digital Income
+            income_debit = 0.0
+            income_credit = abs_amount
+
+        # Line 1: Digital Income line
         self.env['saatchi.accrued_revenue_lines'].create({
             'accrued_revenue_id': accrued_revenue.id,
             'account_id': digital_income_account.id,
             'label': 'Digital Income - Adjustment',
-            'debit': total_accrual_amount,
-            'credit': 0.0,
+            'debit': income_debit,
+            'credit': income_credit,
             'currency_id': line_currency.id,
             'analytic_distribution': analytic_distribution,
         })
 
-        # Line 2: Cr. Total Accrued (will be auto-calculated to match)
+        # Line 2: Total Accrued (auto-balanced by update_total_accrued_line via create trigger)
         self.env['saatchi.accrued_revenue_lines'].create({
             'accrued_revenue_id': accrued_revenue.id,
             'label': 'Total Accrued',
@@ -767,10 +777,11 @@ class SaleOrder(models.Model):
         })
 
         accrued_revenue.write(
-            {'ce_original_total_amount': total_accrual_amount})
+            {'ce_original_total_amount': abs_amount})
 
         _logger.info(
-            f"✓ Created adjustment entry for SO {self.name}, default amount: {total_accrual_amount} (NO auto-reversal)")
+            f"✓ Created adjustment entry for SO {self.name}, amount: {adjustment_amount} "
+            f"({'reduce' if adjustment_amount < 0 else 'increase'} accrual)")
 
         return accrued_revenue.id
 

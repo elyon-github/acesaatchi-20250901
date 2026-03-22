@@ -831,7 +831,8 @@ class AccruedRevenueXLSX(models.AbstractModel):
                     amounts['manual_reaccrual'] += net_amount
 
             elif line.x_type_of_entry in ['adjustment_system', 'adjustment_manual']:
-                # All adjustments within the accrual month
+                # Adjustments & their reversals within the accrual month
+                # (adjustment and reversal land in different months by design)
                 if accrual_month <= line.date <= accrual_month_end:
                     amounts['manual_adjustment'] += net_amount
 

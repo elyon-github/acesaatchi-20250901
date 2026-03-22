@@ -79,7 +79,26 @@
                         type="object"
                         string="Create Entry"
                         class="btn-primary"
-                        invisible="state != 'draft'"
+                        invisible="state != 'draft' or related_accrued_entry"
+                    />
+                <button name="create_entries"
+                        type="object"
+                        string="Update &amp; Repost"
+                        class="btn-primary"
+                        invisible="state != 'draft' or not related_accrued_entry"
+                    />
+                <button name="action_reset_to_draft"
+                        type="object"
+                        string="Reset to Draft"
+                        invisible="state not in ('accrued', 'reversed', 'cancel')"
+                        confirm="This will move all linked journal entries back to draft. You can then edit amounts and repost. Continue?"
+                    />
+                <button name="action_cancel_draft"
+                        type="object"
+                        string="Cancel"
+                        class="btn-danger"
+                        invisible="state != 'draft' or not related_accrued_entry"
+                        confirm="This will cancel all linked journal entries. Continue?"
                     />
                 <field name="state" widget="statusbar"
                        statusbar_visible="draft,accrued,reversed"

@@ -70,14 +70,14 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
     accrual_scenario = fields.Selection(
         [
             ('scenario_1', 'Scenario 1: Manual Accrue (Override Validation)'),
-            ('scenario_2', 'Scenario 2: Cancel & Replace Existing Accrue (Accrued/Reversed State Only)'),
+            ('scenario_2', 'Scenario 2: Adjustment Entry (With Auto-Reversal)'),
             ('scenario_3', 'Scenario 3: Create Adjustment Entry (NO Auto-Reversal)')
         ],
         string="Accrual Scenario",
         default='scenario_1',
         help="""
         Scenario 1: Creates accruals bypassing CE status validation (allows any status)
-        Scenario 2: Cancels existing accruals in 'Accrued' state and replaces them with new ones (Draft/Cancelled accruals are ignored)
+        Scenario 2: Creates adjustment entries alongside existing accruals (with auto-reversal) - does NOT cancel existing entries
         Scenario 3: Creates adjustment entries (Dr. Digital Income | Cr. Accrued Revenue) - PERMANENT entry with NO auto-reversal
         """
     )
@@ -148,6 +148,10 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                 'create_accrual': not has_duplicate,
                 'is_from_reversal_ob': is_client_sig,
             })
+
+        # Default adjustment_amount to amount_left_to_accrue for each line
+        for wiz_line in self.so_line_ids:
+            wiz_line.adjustment_amount = wiz_line.amount_left_to_accrue
 
         # Reload the wizard form to reflect changes
         return {
@@ -268,7 +272,7 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                 ) % so_list)
 
         if self.accrual_scenario == 'scenario_2':
-            # Scenario 2: Only SOs with existing accruals in 'accrued' state
+            # Scenario 2: Only SOs with existing accruals in 'accrued' or 'reversed' state
             sos_without_accrued = []
             for line in selected_lines:
                 accrued_records = line.existing_accrual_ids.filtered(
@@ -280,9 +284,9 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                 so_list = '\n'.join(f'  • {so}' for so in sos_without_accrued)
                 errors.append(_(
                     'Scenario 2 Error\n\n'
-                    'The following Sale Orders have no posted accruals to replace:\n\n'
+                    'The following Sale Orders have no posted accruals to adjust:\n\n'
                     '%s\n\n'
-                    'Scenario 2 requires existing accruals in "Accrued" state. Draft or cancelled accruals cannot be replaced.'
+                    'Scenario 2 requires existing accruals in "Accrued" or "Reversed" state.'
                 ) % so_list)
 
         elif self.accrual_scenario == 'scenario_3':
@@ -525,10 +529,12 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
 
     def _execute_scenario_2(self, selected_lines):
         """
-        Scenario 2: Cancel & Replace Existing
+        Scenario 2: Adjustment Entry (With Auto-Reversal)
 
-        Cancels existing accruals (ONLY in 'accrued' state) and creates new ones.
-        Draft or cancelled accruals are skipped.
+        Creates adjustment entries alongside existing accruals.
+        Does NOT cancel or replace any existing entries.
+        Entry type will be 'adjustment_manual' (shows in ADDL ADJ column).
+        Includes automatic reversal entry.
 
         Args:
             selected_lines: Wizard lines to process
@@ -538,46 +544,43 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
         """
         created_count = 0
         created_accrual_ids = []
-        replaced_count = 0
-        skipped_not_accrued = []
+        skipped_no_accrued = []
         failed_sos = []
 
         for line in selected_lines:
             try:
-                # Filter to only 'accrued' state records
+                # Verify existing accruals exist (already validated, but double-check)
                 accrued_records = line.existing_accrual_ids.filtered(
                     lambda a: a.state == 'accrued' or a.state == 'reversed')
 
                 if not accrued_records:
-                    skipped_not_accrued.append(
+                    skipped_no_accrued.append(
                         f"{line.sale_order_id.name} (No posted accruals found)")
                     _logger.warning(
-                        f"⚠ Scenario 2: Skipped SO {line.sale_order_id.name} - no accrued state records to replace")
+                        f"⚠ Scenario 2: Skipped SO {line.sale_order_id.name} - no accrued state records to adjust")
                     continue
 
-                # Cancel only the 'accrued' state records
-                for existing_accrual in accrued_records:
-                    existing_accrual.action_reset_and_cancel()
+                if not line.adjustment_amount:
+                    failed_sos.append(
+                        f"{line.sale_order_id.name} (Adjustment Amount is zero)")
+                    continue
 
-                replaced_count += len(accrued_records)
-                _logger.info(
-                    f"✓ Scenario 2: Cancelled {len(accrued_records)} accrued record(s) for SO {line.sale_order_id.name}")
-
-                # Create new accrual
+                # Create adjustment entry WITH auto-reversal
                 result = line.sale_order_id.action_create_custom_accrued_revenue(
                     is_override=False,
                     accrual_date=self.accrual_date,
                     reversal_date=self.reversal_date,
-                    is_adjustment=False,
+                    is_adjustment=True,
                     is_system_generated=False,
-                    keep_foreign_currency=self.keep_foreign_currency
+                    keep_foreign_currency=self.keep_foreign_currency,
+                    adjustment_amount=line.adjustment_amount,
                 )
 
                 if result:
                     created_count += 1
                     created_accrual_ids.append(result)
                     _logger.info(
-                        f"✓ Scenario 2: Created replacement accrual {result} for SO {line.sale_order_id.name}")
+                        f"✓ Scenario 2: Created adjustment entry {result} for SO {line.sale_order_id.name}")
                 else:
                     error_msg = "No eligible lines found"
                     _logger.warning(
@@ -595,12 +598,12 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
 
         # Build summary message
         summary_parts = [
-            f'✅ Scenario 2: Cancelled {replaced_count} and created {created_count} Accrual(s)'
+            f'✅ Scenario 2: Created {created_count} Adjustment Entr(y/ies) with Auto-Reversal'
         ]
 
-        if skipped_not_accrued:
+        if skipped_no_accrued:
             summary_parts.append(
-                f'\nℹ️ Skipped {len(skipped_not_accrued)} SO(s) - no posted accruals')
+                f'\nℹ️ Skipped {len(skipped_no_accrued)} SO(s) - no posted accruals')
 
         if failed_sos:
             summary_parts.append(f'\n❌ Failed: {len(failed_sos)} SO(s)')
@@ -646,6 +649,11 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                         f"⚠ Scenario 3: Skipped SO {line.sale_order_id.name} - no existing accruals")
                     continue
 
+                if not line.adjustment_amount:
+                    failed_sos.append(
+                        f"{line.sale_order_id.name} (Adjustment Amount is zero)")
+                    continue
+
                 # Create adjustment entry (NO auto-reversal)
                 result = line.sale_order_id.action_create_custom_accrued_revenue(
                     is_override=False,
@@ -653,7 +661,8 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                     reversal_date=False,
                     is_adjustment=True,
                     is_system_generated=False,
-                    keep_foreign_currency=self.keep_foreign_currency
+                    keep_foreign_currency=self.keep_foreign_currency,
+                    adjustment_amount=line.adjustment_amount,
                 )
 
                 if result:
@@ -807,6 +816,21 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
         help="Total amount from existing accruals"
     )
 
+    amount_left_to_accrue = fields.Monetary(
+        string="Amount Left to Accrue",
+        compute="_compute_amount_left_to_accrue",
+        store=True,
+        currency_field="currency_id",
+        help="Remaining amount: SO Accrual Amount minus Net Already Accrued (including adjustments)"
+    )
+
+    adjustment_amount = fields.Monetary(
+        string="Adjustment Amount",
+        currency_field="currency_id",
+        help="Amount to adjust. Negative = reduce accrual (Dr. Digital Income / Cr. Accrued Revenue). "
+             "Positive = increase accrual (Dr. Accrued Revenue / Cr. Digital Income)."
+    )
+
     create_accrual = fields.Boolean(
         string="Select",
         default=False,
@@ -847,6 +871,41 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
             else:
                 # line.create_accrual = True
                 line.has_existing_accrual = False
+
+    @api.depends('amount_total', 'existing_accrual_ids',
+                 'existing_accrual_ids.total_debit_in_accrue_account',
+                 'existing_accrual_ids.is_adjustment_entry',
+                 'existing_accrual_ids.related_accrued_entry')
+    def _compute_amount_left_to_accrue(self):
+        """Compute remaining amount to accrue for this SO in the current period.
+
+        Formula: SO Accrual Amount - Net Already Accrued
+
+        Net Already Accrued considers:
+        - Normal accruals: add their total_debit_in_accrue_account (positive)
+        - Posted adjustments: look at actual JE lines on accrued account (debit - credit)
+        - Draft adjustments: look at staging Total Accrued line (debit - credit)
+        """
+        for line in self:
+            net_accrued = 0
+            for record in line.existing_accrual_ids:
+                if not record.is_adjustment_entry:
+                    # Normal accrual: the credit side of income lines = accrual amount
+                    net_accrued += record.total_debit_in_accrue_account
+                else:
+                    # Adjustment: check posted JE for accurate effect
+                    if record.related_accrued_entry and record.related_accrued_entry.state == 'posted':
+                        accrued_acct = record.accrual_account_id
+                        accrued_jl = record.related_accrued_entry.line_ids.filtered(
+                            lambda l, acct=accrued_acct: l.account_id == acct)
+                        # Debit on accrued account = increases accrual
+                        # Credit on accrued account = decreases accrual
+                        net_accrued += sum(accrued_jl.mapped('debit')) - sum(accrued_jl.mapped('credit'))
+                    else:
+                        # Draft adjustment: use staging Total Accrued line
+                        ta_line = record.line_ids.filtered(lambda l: l.label == 'Total Accrued')
+                        net_accrued += sum(ta_line.mapped('debit')) - sum(ta_line.mapped('credit'))
+            line.amount_left_to_accrue = line.amount_total - net_accrued
 
     @api.depends('wizard_id.accrual_date')
     def _compute_create_accrual(self):

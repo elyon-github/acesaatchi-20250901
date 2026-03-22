@@ -605,7 +605,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             'system_accrual': 0,
             'system_reversal': 0,
             'manual_accrual': 0,
-            'manual_reversal': 0
+            'manual_reversal': 0,
+            'addl_adj': 0
         }
 
         # Calculate date range: all entries use the report month
@@ -633,6 +634,10 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 amounts['manual_reversal'] += net_amount
             elif line.x_type_of_entry == 'accrued_manual':
                 amounts['manual_accrual'] += net_amount
+            elif line.x_type_of_entry in ('adjustment_system', 'adjustment_manual'):
+                # Adjustments & their reversals both appear here
+                # (they land in different months by design, so no netting)
+                amounts['addl_adj'] += net_amount
 
         return amounts
 
@@ -960,7 +965,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.set_column(6, 6, 18)   # System Reversal
         sheet.set_column(7, 7, 18)   # Manual Accrual
         sheet.set_column(8, 8, 18)   # Manual Reversal
-        sheet.set_column(9, 9, 15)   # Total
+        sheet.set_column(9, 9, 18)   # ADDL ADJ
+        sheet.set_column(10, 10, 15)  # Total
 
         # Write report header
         row = 0
@@ -976,7 +982,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         headers = [
             'CLIENT', 'DESCRIPTION', 'Year', 'Month', 'BILLED',
             'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
-            'TOTAL'
+            'ADDL ADJ', 'TOTAL'
         ]
 
         for col, header in enumerate(headers):
@@ -995,7 +1001,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 'system_accrual': 0,
                 'system_reversal': 0,
                 'manual_accrual': 0,
-                'manual_reversal': 0
+                'manual_reversal': 0,
+                'addl_adj': 0
             }
 
             # Collect all descriptions, years, months, and sales orders
@@ -1035,6 +1042,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 total_amounts['system_reversal'] += system_reversal_val
                 total_amounts['manual_accrual'] += amounts['manual_accrual']
                 total_amounts['manual_reversal'] += manual_reversal_val
+                total_amounts['addl_adj'] += amounts['addl_adj']
 
                 if ce_data['description']:
                     descriptions.add(ce_data['description'])
@@ -1076,11 +1084,13 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 row, 7, total_amounts['manual_accrual'], formats['currency_negative'])
             sheet.write(
                 row, 8, total_amounts['manual_reversal'], formats['currency_negative'])
+            sheet.write(
+                row, 9, total_amounts['addl_adj'], formats['currency_negative'])
 
             # Total formula
             excel_row = row + 1
             sheet.write_formula(
-                row, 9, f'=E{excel_row}+F{excel_row}+G{excel_row}+H{excel_row}+I{excel_row}', formats['currency'])
+                row, 10, f'=E{excel_row}+F{excel_row}+G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}', formats['currency'])
 
             row += 1
 
@@ -1133,7 +1143,9 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.write_formula(
             total_row, 8, f'=SUM(I{data_start_row + 1}:I{total_row})', currency_negative_bold_format)
         sheet.write_formula(
-            total_row, 9, f'=SUM(J{data_start_row + 1}:J{total_row})', currency_bold_format)
+            total_row, 9, f'=SUM(J{data_start_row + 1}:J{total_row})', currency_negative_bold_format)
+        sheet.write_formula(
+            total_row, 10, f'=SUM(K{data_start_row + 1}:K{total_row})', currency_bold_format)
 
         return True
 
@@ -1163,13 +1175,14 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.set_column(8, 8, 18)   # System Reversal
         sheet.set_column(9, 9, 18)   # Manual Accrual
         sheet.set_column(10, 10, 18)  # Manual Reversal
-        sheet.set_column(11, 11, 15)  # Total
-        sheet.set_column(12, 12, 20)  # CE Status
-        sheet.set_column(13, 13, 15)  # Per CSD
-        sheet.set_column(14, 14, 15)  # Variance
-        sheet.set_column(15, 15, 20)  # Cost to Client
-        sheet.set_column(16, 16, 20)  # For Revenue Adjustment
-        sheet.set_column(17, 17, 30)  # Remarks
+        sheet.set_column(11, 11, 18)  # ADDL ADJ
+        sheet.set_column(12, 12, 15)  # Total
+        sheet.set_column(13, 13, 20)  # CE Status
+        sheet.set_column(14, 14, 15)  # Per CSD
+        sheet.set_column(15, 15, 15)  # Variance
+        sheet.set_column(16, 16, 20)  # Cost to Client
+        sheet.set_column(17, 17, 20)  # For Revenue Adjustment
+        sheet.set_column(18, 18, 30)  # Remarks
 
         # Write report header
         row = 0
@@ -1186,7 +1199,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         headers = [
             'CE#', 'SO REFERENCE', 'CE DATE', 'DESCRIPTION', 'Year', 'Month', 'BILLED',
             'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
-            'TOTAL', 'CE STATUS', 'PER CSD', 'VARIANCE',
+            'ADDL ADJ', 'TOTAL', 'CE STATUS', 'PER CSD', 'VARIANCE',
             f'COST TO CLIENT - {cost_to_client_month}', 'FOR REVENUE ADJUSTMENT', 'REMARKS'
         ]
 
@@ -1263,30 +1276,32 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                         formats['currency_negative'])
             sheet.write(row, 10, manual_reversal_val,
                         formats['currency_negative'])
+            sheet.write(row, 11, amounts['addl_adj'],
+                        formats['currency_negative'])
 
-            # Total formula (includes BILLED + accruals/reversals: G+H+I+J+K which is columns 6-10)
+            # Total formula (includes BILLED + accruals/reversals + ADDL ADJ: G+H+I+J+K+L which is columns 6-11)
             excel_row = row + 1
             sheet.write_formula(
-                row, 11, f'=G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}', formats['currency'])
+                row, 12, f'=G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}+L{excel_row}', formats['currency'])
 
-            sheet.write(row, 12, ce_data['ce_status'], formats['centered'])
+            sheet.write(row, 13, ce_data['ce_status'], formats['centered'])
 
             # PER CSD - empty for user input
-            sheet.write(row, 13, '', formats['currency'])
+            sheet.write(row, 14, '', formats['currency'])
 
-            # VARIANCE formula: Total - Per CSD (L - N which is 11 - 13)
+            # VARIANCE formula: Total - Per CSD (M - O which is 12 - 14)
             sheet.write_formula(
-                row, 14, f'=L{excel_row}-N{excel_row}', formats['currency'])
+                row, 15, f'=M{excel_row}-O{excel_row}', formats['currency'])
 
             # COST TO CLIENT - empty for user input
-            sheet.write(row, 15, '', formats['currency'])
+            sheet.write(row, 16, '', formats['currency'])
 
-            # FOR REVENUE ADJUSTMENT formula: Variance - Cost to Client (O - P which is 14 - 15)
+            # FOR REVENUE ADJUSTMENT formula: Variance - Cost to Client (P - Q which is 15 - 16)
             sheet.write_formula(
-                row, 16, f'=O{excel_row}-P{excel_row}', formats['currency'])
+                row, 17, f'=P{excel_row}-Q{excel_row}', formats['currency'])
 
             # REMARKS - empty for user input
-            sheet.write(row, 17, '', formats['normal'])
+            sheet.write(row, 18, '', formats['normal'])
 
             row += 1
 
@@ -1339,28 +1354,30 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.write_formula(
             total_row, 10, f'=SUM(K{data_start_row + 1}:K{total_row})', currency_negative_bold_format)
         sheet.write_formula(
-            total_row, 11, f'=SUM(L{data_start_row + 1}:L{total_row})', currency_bold_format)
+            total_row, 11, f'=SUM(L{data_start_row + 1}:L{total_row})', currency_negative_bold_format)
+        sheet.write_formula(
+            total_row, 12, f'=SUM(M{data_start_row + 1}:M{total_row})', currency_bold_format)
 
         # Empty CE Status cell
-        sheet.write(total_row, 12, '', formats['section_header_no_border'])
+        sheet.write(total_row, 13, '', formats['section_header_no_border'])
 
         # Sum for PER CSD
         sheet.write_formula(
-            total_row, 13, f'=SUM(N{data_start_row + 1}:N{total_row})', currency_bold_format)
+            total_row, 14, f'=SUM(O{data_start_row + 1}:O{total_row})', currency_bold_format)
 
         # Sum for VARIANCE
         sheet.write_formula(
-            total_row, 14, f'=SUM(O{data_start_row + 1}:O{total_row})', currency_bold_format)
+            total_row, 15, f'=SUM(P{data_start_row + 1}:P{total_row})', currency_bold_format)
 
         # Sum for COST TO CLIENT
         sheet.write_formula(
-            total_row, 15, f'=SUM(P{data_start_row + 1}:P{total_row})', currency_bold_format)
+            total_row, 16, f'=SUM(Q{data_start_row + 1}:Q{total_row})', currency_bold_format)
 
         # Sum for FOR REVENUE ADJUSTMENT
         sheet.write_formula(
-            total_row, 16, f'=SUM(Q{data_start_row + 1}:Q{total_row})', currency_bold_format)
+            total_row, 17, f'=SUM(R{data_start_row + 1}:R{total_row})', currency_bold_format)
 
         # Empty REMARKS cell
-        sheet.write(total_row, 17, '', formats['section_header_no_border'])
+        sheet.write(total_row, 18, '', formats['section_header_no_border'])
 
         return True
