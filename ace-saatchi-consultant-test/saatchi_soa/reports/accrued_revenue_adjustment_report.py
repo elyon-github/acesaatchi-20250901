@@ -658,16 +658,81 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 'Could not retrieve excluded billed accounts: %s', str(e))
         return set()
 
+    def _get_amount_untaxed_in_company_currency(self, move):
+        """Get the untaxed invoice amount in company currency (PHP).
+
+        When the invoice is in a foreign currency (e.g. USD), the stored
+        ``amount_untaxed`` is in that foreign currency.  Instead of
+        converting via exchange rates, this method reads the PHP amounts
+        directly from the journal item balances which are *always* stored
+        in company currency.
+
+        Only product / rounding lines (excluding tax-repartition rounding)
+        are summed — the same set Odoo uses internally.
+
+        Args:
+            move: account.move record (invoice / credit memo)
+
+        Returns:
+            float: absolute untaxed amount in company currency
+        """
+        company_currency = move.company_id.currency_id or self.env.company.currency_id
+        if move.currency_id == company_currency:
+            return move.amount_untaxed
+
+        # Sum the balance (debit − credit) of product / rounding lines.
+        # This mirrors Odoo's own _compute_amount logic for amount_untaxed_signed.
+        total_balance = 0.0
+        for line in move.line_ids:
+            if line.display_type in ('product', 'rounding') \
+                    and not line.tax_repartition_line_id:
+                total_balance += (line.debit or 0.0) - (line.credit or 0.0)
+
+        # Return the absolute value; callers handle the sign
+        # (positive for invoices, negated for credit memos).
+        return abs(total_balance)
+
+    def _get_cm_deduction_for_invoice(self, invoice):
+        """Get the total credit memo deduction applied against an invoice.
+
+        Looks at the invoice's receivable line reconciliations to find
+        credit memos (out_refund) that have been used as payment.  Returns
+        the sum of reconciled amounts in **company currency** (from
+        account.partial.reconcile.amount).
+
+        Args:
+            invoice: account.move record (out_invoice)
+
+        Returns:
+            float: total CM amount reconciled against this invoice (positive value)
+        """
+        cm_total = 0.0
+        receivable_lines = invoice.line_ids.filtered(
+            lambda l: l.account_id.account_type == 'asset_receivable'
+        )
+        for line in receivable_lines:
+            # matched_credit_ids: partials where this debit line was matched
+            for partial in line.matched_credit_ids:
+                counterpart = partial.credit_move_id
+                if counterpart.move_id.move_type == 'out_refund':
+                    cm_total += partial.amount  # already in company currency
+            # matched_debit_ids: partials where this credit line was matched
+            for partial in line.matched_debit_ids:
+                counterpart = partial.debit_move_id
+                if counterpart.move_id.move_type == 'out_refund':
+                    cm_total += partial.amount
+        return cm_total
+
     def _calculate_billed_amount(self, sales_order_ids, report_month):
         """Calculate total billed amount for given sales orders in the report month.
 
-        Formula:
-            billed += invoice.amount_untaxed
-            exclusion += credit of excluded-account journal items
-            Final = total_billed - total_exclusion
-
-        Only posted invoices (out_invoice) with x_studio_invoice_type == 'CE Related'
-        are included.
+        Logic:
+            1. Find all posted Customer Invoices (out_invoice) with
+               x_studio_invoice_type == 'CE Related' in the report month.
+            2. For each invoice, get the untaxed amount in company currency.
+            3. Check if any credit memos (out_refund) have been reconciled
+               against the invoice as payment — if so, subtract that amount.
+            4. Subtract excluded-account journal item amounts.
 
         Additionally, this method searches for "orphan" invoices — moves NOT
         linked to any sales order but whose x_studio_old_ce_1 field (on
@@ -696,24 +761,26 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         total_exclusion = 0.0
         processed_invoice_ids = set()
 
-        def _apply_credit_memo(credit_memo):
-            """Calculate billed and exclusion for a single credit memo.
-            Returns (billed_delta, exclusion_delta)."""
-            billed_delta = -credit_memo.amount_untaxed
-            exclusion_delta = 0.0
-            if excluded_account_ids:
-                for line in credit_memo.line_ids:
-                    if line.account_id and line.account_id.id in excluded_account_ids:
-                        # In out_refund, income accounts are debited (not credited)
-                        # AND we negate the exclusion to mirror the billed deduction
-                        exclusion_delta -= (line.debit or 0.0)
-                        exclusion_delta += (line.credit or 0.0)
-            return billed_delta, exclusion_delta
-
         def _apply_invoice(inv):
             """Calculate billed and exclusion for a single invoice.
-            Returns (billed_delta, exclusion_delta)."""
-            billed_delta = inv.amount_untaxed
+
+            Billed = untaxed amount in company currency
+                     minus any credit memos reconciled as payment
+            Exclusion = net amount on excluded accounts
+
+            Returns (billed_delta, exclusion_delta).
+            """
+            billed_delta = self._get_amount_untaxed_in_company_currency(inv)
+
+            # Subtract credit memos that were applied as payment
+            cm_deduction = self._get_cm_deduction_for_invoice(inv)
+            if cm_deduction:
+                _logger.info(
+                    'Invoice %s: subtracting CM deduction %.2f from billed %.2f',
+                    inv.name, cm_deduction, billed_delta,
+                )
+                billed_delta -= cm_deduction
+
             exclusion_delta = 0.0
             if excluded_account_ids:
                 for line in inv.line_ids:
@@ -726,7 +793,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sales_orders = self.env['sale.order'].browse(list(sales_order_ids))
 
         # ------------------------------------------------------------------
-        # STEP 1: Process SO-linked invoices and credit memos
+        # STEP 1: Process SO-linked invoices (out_invoice only)
         # ------------------------------------------------------------------
         old_ce_codes = set()  # collect old CE codes for orphan lookup later
 
@@ -737,7 +804,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             if so_old_ce:
                 old_ce_codes.add(self._normalize_ce_code(so_old_ce))
 
-            # Process SO-linked invoices (out_invoice)
+            # Process SO-linked invoices (out_invoice only)
             moves = so.invoice_ids.filtered(
                 lambda inv: inv.state == 'posted'
                 and inv.move_type == 'out_invoice'
@@ -751,23 +818,11 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 total_billed += b_delta
                 total_exclusion += e_delta
 
-            # Process SO-linked credit memos (out_refund)
-            credit_memos = so.invoice_ids.filtered(
-                lambda inv: inv.state == 'posted'
-                and inv.move_type == 'out_refund'
-                and inv.invoice_date
-                and month_start <= inv.invoice_date <= month_end
-                and getattr(inv, 'x_studio_invoice_type', '') == 'CE Related'
-            )
-            for credit_memo in credit_memos:
-                processed_invoice_ids.add(credit_memo.id)
-                b_delta, e_delta = _apply_credit_memo(credit_memo)
-                total_billed += b_delta
-                total_exclusion += e_delta
-
         # ------------------------------------------------------------------
         # STEP 2: Find orphan invoices (not linked to ANY SO) whose
         #         x_studio_old_ce_1 matches one of the SO old CE codes.
+        #         Only out_invoice — credit memos are handled via
+        #         reconciliation against the invoices above.
         # ------------------------------------------------------------------
 
         if old_ce_codes:
@@ -781,65 +836,11 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 ('x_studio_old_ce_1', '!=', False),
             ]
 
-            credit_memo_domain = [
-                ('state', '=', 'posted'),
-                ('move_type', '=', 'out_refund'),
-                ('invoice_date', '>=', month_start),
-                ('invoice_date', '<=', month_end),
-                ('company_id', 'in', self.env.companies.ids),
-                ('x_studio_old_ce_1', '!=', False),
-            ]
-
             try:
                 candidate_moves = self.env['account.move'].sudo().search(
                     orphan_domain)
-                candidate_credit_memos = self.env['account.move'].sudo().search(
-                    credit_memo_domain)
             except Exception:
                 candidate_moves = self.env['account.move']
-                candidate_credit_memos = self.env['account.move']
-
-            for credit_memo in candidate_credit_memos:
-                # Skip already processed (SO-linked) credit memos
-                if credit_memo.id in processed_invoice_ids:
-                    continue
-
-                # Must be CE Related
-                if getattr(credit_memo, 'x_studio_invoice_type', '') != 'CE Related':
-                    continue
-
-                # Check if credit memo's x_studio_old_ce_1 matches any SO old CE
-                inv_old_ce = getattr(
-                    credit_memo, 'x_studio_old_ce_1', '') or ''
-                if not inv_old_ce:
-                    continue
-                if self._normalize_ce_code(inv_old_ce) not in old_ce_codes:
-                    continue
-
-                # Verify this credit memo is truly orphan (not linked to ANY SO)
-                has_sale_link = any(
-                    aml.sale_line_ids for aml in credit_memo.line_ids
-                )
-                if has_sale_link:
-                    continue
-
-                # Skip if this reverses an already-processed SO invoice
-                reversed_origin = credit_memo.reversed_entry_id
-                if reversed_origin and reversed_origin.id in processed_invoice_ids:
-                    continue
-
-                # Include this orphan credit memo
-                processed_invoice_ids.add(credit_memo.id)
-                b_delta, e_delta = _apply_credit_memo(credit_memo)
-                total_billed += b_delta
-                total_exclusion += e_delta
-                if credit_memo.name:
-                    _logger.info(
-                        'Included orphan credit memo %s (old CE: %s) in billed calculation '
-                        'with billed_delta %.2f and exclusion_delta %.2f. Total billed so far: %.2f',
-                        credit_memo.name, credit_memo.x_studio_old_ce_1,
-                        b_delta, e_delta, total_billed,
-                    )
 
             for inv in candidate_moves:
                 # Skip already processed (SO-linked) invoices

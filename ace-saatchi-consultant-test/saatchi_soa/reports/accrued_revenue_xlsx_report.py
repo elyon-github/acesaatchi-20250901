@@ -1005,19 +1005,63 @@ class AccruedRevenueXLSX(models.AbstractModel):
                 amounts = self._calculate_amounts_by_type(
                     ce_data['lines'], accrual_month)
 
+                # ── Compute all monetary values before writing ──
+
+                # Previous month ending balance (column G)
+                prev_balance = prev_month_balances.get(
+                    (partner_name, ce_code), None)
+
+                norm_ce = self._normalize_ce_code(ce_code)
+                total_from_all_keys = 0
+                found_any = False
+                for (bal_partner, bal_ce), bal_amount in prev_month_balances.items():
+                    if self._normalize_ce_code(bal_ce) == norm_ce:
+                        total_from_all_keys += bal_amount
+                        found_any = True
+
+                if found_any:
+                    prev_balance = total_from_all_keys
+
+                prev_balance = prev_balance or 0
+
+                # Reversal opening balance overrides (OB month only)
+                norm_ce_for_rev = self._normalize_ce_code(ce_code)
+                rev_ob = reversal_ob_balances.get(norm_ce_for_rev, {})
+
+                # Column H (7): System Reversal
+                system_reversal_val = amounts['system_reversal']
+                if system_reversal_val == 0 and rev_ob.get('system_reversal', 0) != 0:
+                    system_reversal_val = rev_ob['system_reversal']
+
+                # Column J (9): Manual Reversal (includes adjustment from reversal OB)
+                manual_reversal_val = amounts['manual_reversal']
+                if manual_reversal_val == 0 and rev_ob.get('manual_reversal', 0) != 0:
+                    manual_reversal_val = rev_ob['manual_reversal']
+                manual_reversal_val -= rev_ob.get('manual_reversal_adjustment', 0)
+
+                # Skip row if ALL monetary columns (G through M) are zero
+                all_monetary = [
+                    prev_balance,
+                    system_reversal_val,
+                    amounts['system_accrual'],
+                    manual_reversal_val,
+                    amounts['manual_reaccrual'],
+                    amounts['manual_adjustment'],
+                ]
+                if all(v == 0 for v in all_monetary):
+                    continue
+
                 # Check if this is an OB-only row (no accrued lines)
                 is_ob_only_row = not ce_data['lines']
                 
                 # If OB-only, verify it also doesn't exist in sale.order
                 if is_ob_only_row:
-                    # Use the existing method that checks x_ce_code and x_studio_old_ce
                     so_match = self._find_sale_order_by_ce_code(ce_code)
-                    # Only mark red if CE doesn't exist in any sale order
                     is_ob_only_row = not so_match
 
+                # ── Write the row ──
+
                 sheet.write(row, 0, partner_name, formats['normal'])
-                
-                # Determine CE# format based on OB and reversal OB presence
                 sheet.write(row, 1, ce_data['so_reference'], formats['centered'])
                 sheet.write(row, 2, ce_code, formats['centered'])
 
@@ -1033,49 +1077,11 @@ class AccruedRevenueXLSX(models.AbstractModel):
                 else:
                     sheet.write(row, 5, '', formats['centered'])
 
-                # Get previous month ending balance.
-                # First try exact match, then fall back to normalized CE# matching.
-                # SUM all matching entries (OB and DB may have different partner keys).
-                prev_balance = prev_month_balances.get(
-                    (partner_name, ce_code), None)
-
-                # Always do normalized CE# matching to catch entries with different
-                # partner names (e.g., OB partner vs DB journal partner).
-                # Sum ALL entries with the same normalized CE code.
-                norm_ce = self._normalize_ce_code(ce_code)
-                total_from_all_keys = 0
-                found_any = False
-                for (bal_partner, bal_ce), bal_amount in prev_month_balances.items():
-                    if self._normalize_ce_code(bal_ce) == norm_ce:
-                        total_from_all_keys += bal_amount
-                        found_any = True
-
-                if found_any:
-                    prev_balance = total_from_all_keys
-
-                prev_balance = prev_balance or 0
                 sheet.write(row, 6, prev_balance, formats['currency'])
-
-                # Check for reversal opening balance overrides (OB month only)
-                norm_ce_for_rev = self._normalize_ce_code(ce_code)
-                rev_ob = reversal_ob_balances.get(norm_ce_for_rev, {})
-
-                # Column H (7): System Reversal
-                system_reversal_val = amounts['system_reversal']
-                if system_reversal_val == 0 and rev_ob.get('system_reversal', 0) != 0:
-                    system_reversal_val = rev_ob['system_reversal']
                 sheet.write(
                     row, 7, system_reversal_val, formats['currency_negative'])
-
                 sheet.write(
                     row, 8, amounts['system_accrual'], formats['currency_negative'])
-
-                # Column J (9): Manual Reversal (includes adjustment from reversal OB)
-                manual_reversal_val = amounts['manual_reversal']
-                if manual_reversal_val == 0 and rev_ob.get('manual_reversal', 0) != 0:
-                    manual_reversal_val = rev_ob['manual_reversal']
-                # Subtract manual reversal adjustment from reversal OB (combined into col I)
-                manual_reversal_val -= rev_ob.get('manual_reversal_adjustment', 0)
                 sheet.write(
                     row, 9, manual_reversal_val, formats['currency_negative'])
                 sheet.write(
