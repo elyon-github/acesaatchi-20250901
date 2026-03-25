@@ -101,12 +101,29 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
 
     # ========== Compute Methods ==========
 
+    so_lines_with_existing_ids = fields.Many2many(
+        'saatchi.accrued_revenue.wizard.line',
+        'wiz_so_lines_with_existing_rel',
+        'wizard_id',
+        'wizard_line_id',
+        string="Lines with Existing Accruals",
+        compute="_compute_so_lines_with_existing",
+    )
+
     @api.depends('so_line_ids.existing_accrual_ids')
     def _compute_has_existing_accruals(self):
         """Check if any wizard line has existing accruals"""
         for wizard in self:
             wizard.has_existing_accruals = any(
                 line.existing_accrual_ids for line in wizard.so_line_ids
+            )
+
+    @api.depends('so_line_ids', 'so_line_ids.existing_accrual_ids')
+    def _compute_so_lines_with_existing(self):
+        """Return wizard lines that have existing accruals (for the Existing Accruals tab)"""
+        for wizard in self:
+            wizard.so_lines_with_existing_ids = wizard.so_line_ids.filtered(
+                lambda l: l.existing_accrual_ids
             )
 
     # ========== Default Methods ==========
@@ -133,11 +150,19 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
         self.so_line_ids.unlink()
 
         # Create new lines directly in DB
+        company_currency = self.env.company.currency_id
         for so in potential_sos:
             amount_total = so._calculate_accrual_amount(
                 accrual_date=self.accrual_date)
             if not amount_total:
                 continue
+
+            # Convert to company currency (PHP) if SO is in foreign currency
+            if so.currency_id != company_currency:
+                date_order = so.date_order.date() if so.date_order else self.accrual_date
+                amount_total = so.currency_id._convert(
+                    amount_total, company_currency, so.company_id, date_order)
+
             has_duplicate = so in duplicate_sos
             is_client_sig = so.id in client_sig_so_ids
             self.env['saatchi.accrued_revenue.wizard.line'].create({
@@ -779,8 +804,9 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
 
     currency_id = fields.Many2one(
         'res.currency',
-        related='sale_order_id.currency_id',
-        readonly=True
+        compute='_compute_currency_id',
+        readonly=True,
+        help="Always uses company currency (PHP) for display, regardless of SO currency"
     )
 
     has_existing_accrual = fields.Boolean(
@@ -803,6 +829,9 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
 
     existing_accrual_ids = fields.Many2many(
         'saatchi.accrued_revenue',
+        'wiz_line_existing_accrual_rel',
+        'wizard_line_id',
+        'accrual_id',
         string="Existing Accruals",
         compute="_compute_existing_accruals",
         store=True,
@@ -819,9 +848,8 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
     amount_left_to_accrue = fields.Monetary(
         string="Amount Left to Accrue",
         compute="_compute_amount_left_to_accrue",
-        store=True,
         currency_field="currency_id",
-        help="Remaining amount: SO Accrual Amount minus Net Already Accrued (including adjustments)"
+        help="Remaining amount: SO Accrual Amount minus Net Already Accrued (in company currency PHP)"
     )
 
     adjustment_amount = fields.Monetary(
@@ -841,6 +869,13 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
 
     # ========== Compute Methods ==========
 
+    @api.depends('sale_order_id')
+    def _compute_currency_id(self):
+        """Always use company currency (PHP) for wizard line amounts"""
+        company_currency = self.env.company.currency_id
+        for line in self:
+            line.currency_id = company_currency
+
     @api.depends('sale_order_id', 'wizard_id.accrual_date', 'wizard_id.reversal_date')
     def _compute_existing_accruals(self):
         """Find existing accruals for this sale order in the current period"""
@@ -858,19 +893,23 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
 
     @api.depends('existing_accrual_ids', 'existing_accrual_ids.total_debit_in_accrue_account')
     def _compute_existing_accrual_total(self):
-        """Calculate total from existing accruals"""
+        """Calculate total from existing accruals (converted to company currency).
+        Only includes non-draft (accrued/reversed) records."""
+        company_currency = self.env.company.currency_id
         for line in self:
-            line.existing_accrual_total = sum(
-                line.existing_accrual_ids.mapped(
-                    'total_debit_in_accrue_account')
-            )
-
-            if line.existing_accrual_total:
-                # line.create_accrual = False
-                line.has_existing_accrual = True
-            else:
-                # line.create_accrual = True
-                line.has_existing_accrual = False
+            total = 0
+            for record in line.existing_accrual_ids:
+                if record.state == 'draft':
+                    continue
+                amount = record.total_debit_in_accrue_account
+                if record.currency_id != company_currency and amount:
+                    so = record.x_related_ce_id
+                    conversion_date = (so.date_order.date() if so and so.date_order else record.date)
+                    amount = record.currency_id._convert(
+                        amount, company_currency, record.company_id, conversion_date)
+                total += amount
+            line.existing_accrual_total = total
+            line.has_existing_accrual = bool(total)
 
     @api.depends('amount_total', 'existing_accrual_ids',
                  'existing_accrual_ids.total_debit_in_accrue_account',
@@ -879,19 +918,27 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
     def _compute_amount_left_to_accrue(self):
         """Compute remaining amount to accrue for this SO in the current period.
 
-        Formula: SO Accrual Amount - Net Already Accrued
+        Formula: SO Accrual Amount (PHP) - Net Already Accrued (converted to PHP)
+
+        amount_total is already stored in company currency (PHP) at creation time.
 
         Net Already Accrued considers:
         - Normal accruals: add their total_debit_in_accrue_account (positive)
         - Posted adjustments: look at actual JE lines on accrued account (debit - credit)
         - Draft adjustments: look at staging Total Accrued line (debit - credit)
         """
+        company_currency = self.env.company.currency_id
         for line in self:
+            # amount_total is already stored in company currency (PHP)
+            so_amount_php = line.amount_total
+
             net_accrued = 0
             for record in line.existing_accrual_ids:
+                if record.state == 'draft':
+                    continue
                 if not record.is_adjustment_entry:
                     # Normal accrual: the credit side of income lines = accrual amount
-                    net_accrued += record.total_debit_in_accrue_account
+                    amount = record.total_debit_in_accrue_account
                 else:
                     # Adjustment: check posted JE for accurate effect
                     if record.related_accrued_entry and record.related_accrued_entry.state == 'posted':
@@ -900,12 +947,20 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
                             lambda l, acct=accrued_acct: l.account_id == acct)
                         # Debit on accrued account = increases accrual
                         # Credit on accrued account = decreases accrual
-                        net_accrued += sum(accrued_jl.mapped('debit')) - sum(accrued_jl.mapped('credit'))
+                        amount = sum(accrued_jl.mapped('debit')) - sum(accrued_jl.mapped('credit'))
                     else:
                         # Draft adjustment: use staging Total Accrued line
                         ta_line = record.line_ids.filtered(lambda l: l.label == 'Total Accrued')
-                        net_accrued += sum(ta_line.mapped('debit')) - sum(ta_line.mapped('credit'))
-            line.amount_left_to_accrue = line.amount_total - net_accrued
+                        amount = sum(ta_line.mapped('debit')) - sum(ta_line.mapped('credit'))
+
+                # Convert to company currency if the accrual record is in a foreign currency
+                if record.currency_id != company_currency and amount:
+                    so = record.x_related_ce_id
+                    conversion_date = (so.date_order.date() if so and so.date_order else record.date)
+                    amount = record.currency_id._convert(
+                        amount, company_currency, record.company_id, conversion_date)
+                net_accrued += amount
+            line.amount_left_to_accrue = so_amount_php - net_accrued
 
     @api.depends('wizard_id.accrual_date')
     def _compute_create_accrual(self):

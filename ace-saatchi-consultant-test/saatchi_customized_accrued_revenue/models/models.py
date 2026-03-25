@@ -668,10 +668,10 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
                             skip_total_update=True).unlink()
                     continue
 
-                # VALIDATION: Check against CE original amount
-                if record.ce_original_total_amount and abs(total) > abs(record.ce_original_total_amount):
-                    raise UserError(
-                        _("Total accrued amount cannot exceed the original CE amount."))
+                # VALIDATION: Check against CE original amount (disabled per business requirement)
+                # if record.ce_original_total_amount and abs(total) > abs(record.ce_original_total_amount):
+                #     raise UserError(
+                #         _("Total accrued amount cannot exceed the original CE amount."))
 
                 if not analytic_distribution and record.x_related_ce_id:
                     if hasattr(record.x_related_ce_id, 'analytic_distribution') and record.x_related_ce_id.analytic_distribution:
@@ -880,11 +880,19 @@ class SaatchiCustomizedAccruedRevenue(models.Model):
             'reversal_date': reversal_date,
         })
 
+        company_currency = self.env.company.currency_id
         for so in potential_sos:
             amount_total = so._calculate_accrual_amount(
                 accrual_date=accrual_date)
             if not amount_total:
                 continue
+
+            # Convert to company currency (PHP) if SO is in foreign currency
+            if so.currency_id != company_currency:
+                date_order = so.date_order.date() if so.date_order else accrual_date
+                amount_total = so.currency_id._convert(
+                    amount_total, company_currency, so.company_id, date_order)
+
             has_duplicate = so in duplicate_sos
             is_client_sig = so.id in client_sig_so_ids
             self.env['saatchi.accrued_revenue.wizard.line'].create({

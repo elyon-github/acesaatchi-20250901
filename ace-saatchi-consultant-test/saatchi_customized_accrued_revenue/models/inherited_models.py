@@ -721,14 +721,15 @@ class SaleOrder(models.Model):
                 _logger.info(
                     f"Creating adjustment entry for SO {self.name} with 0 default amount")
 
-        # Convert to company currency if needed
-        if should_convert and adjustment_amount:
-            adjustment_amount = self.currency_id._convert(
-                adjustment_amount,
-                self.company_id.currency_id,
-                self.company_id,
-                conversion_date or accrued_revenue.date
-            )
+            # Convert fallback amount (in SO currency) to company currency if needed
+            if should_convert and adjustment_amount:
+                adjustment_amount = self.currency_id._convert(
+                    adjustment_amount,
+                    self.company_id.currency_id,
+                    self.company_id,
+                    conversion_date or accrued_revenue.date
+                )
+        # else: wizard-provided adjustment_amount is already in company currency (PHP)
 
         line_currency = self.company_id.currency_id if should_convert else self.currency_id
         abs_amount = abs(adjustment_amount)

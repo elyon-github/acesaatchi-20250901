@@ -231,13 +231,12 @@
                               name="existing_accruals" 
                               invisible="not has_existing_accruals">
                             
-                            <field name="so_line_ids" nolabel="1">
+                            <field name="so_lines_with_existing_ids" nolabel="1" readonly="1">
                                 <!-- List View -->
                                 <list string="Sale Orders with Existing Accruals" 
                                       create="0" 
                                       delete="0" 
-                                      edit="0" 
-                                      decoration-muted="not existing_accrual_ids">
+                                      edit="0">
                                     
                                     <!-- Reference Information -->
                                     <field name="sale_order_id" 
@@ -352,7 +351,7 @@
                                                         
                                                         <field name="ce_original_total_amount" 
                                                                string="CE Total" 
-                                                               optional="hide"/>
+                                                           optional="hide"/>
                                                         
                                                         <!-- Additional Info -->
                                                         <field name="journal_id" 
@@ -375,13 +374,6 @@
                                                      role="alert" 
                                                      invisible="not existing_accrual_ids">
                                                     <strong>Tip:</strong> Click any row to view full accrual details and journal entries.
-                                                </div>
-                                                
-                                                <!-- Help Text - No Accruals -->
-                                                <div class="alert alert-warning mt-3" 
-                                                     role="alert" 
-                                                     invisible="existing_accrual_ids">
-                                                    <strong>No History:</strong> No existing accruals found for this sale order in the selected period.
                                                 </div>
                                             </page>
                                         </notebook>
