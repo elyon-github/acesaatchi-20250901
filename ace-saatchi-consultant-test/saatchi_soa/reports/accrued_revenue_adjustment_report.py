@@ -694,33 +694,34 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
     def _get_cm_deduction_for_invoice(self, invoice):
         """Get the total credit memo deduction applied against an invoice.
-
-        Looks at the invoice's receivable line reconciliations to find
-        credit memos (out_refund) that have been used as payment.  Returns
-        the sum of reconciled amounts in **company currency** (from
-        account.partial.reconcile.amount).
-
-        Args:
-            invoice: account.move record (out_invoice)
-
-        Returns:
-            float: total CM amount reconciled against this invoice (positive value)
+    
+        Returns the untaxed portion of the CM in company currency, to match
+        how the invoice billed amount is calculated (untaxed only).
         """
         cm_total = 0.0
+        company_currency = invoice.company_id.currency_id or self.env.company.currency_id
+    
         receivable_lines = invoice.line_ids.filtered(
             lambda l: l.account_id.account_type == 'asset_receivable'
         )
+    
+        processed_cm_ids = set()
+    
         for line in receivable_lines:
-            # matched_credit_ids: partials where this debit line was matched
             for partial in line.matched_credit_ids:
                 counterpart = partial.credit_move_id
-                if counterpart.move_id.move_type == 'out_refund':
-                    cm_total += partial.amount  # already in company currency
-            # matched_debit_ids: partials where this credit line was matched
+                cm_move = counterpart.move_id
+                if cm_move.move_type == 'out_refund' and cm_move.id not in processed_cm_ids:
+                    processed_cm_ids.add(cm_move.id)
+                    cm_total += self._get_amount_untaxed_in_company_currency(cm_move)
+    
             for partial in line.matched_debit_ids:
                 counterpart = partial.debit_move_id
-                if counterpart.move_id.move_type == 'out_refund':
-                    cm_total += partial.amount
+                cm_move = counterpart.move_id
+                if cm_move.move_type == 'out_refund' and cm_move.id not in processed_cm_ids:
+                    processed_cm_ids.add(cm_move.id)
+                    cm_total += self._get_amount_untaxed_in_company_currency(cm_move)
+    
         return cm_total
 
     def _calculate_billed_amount(self, sales_order_ids, report_month):
