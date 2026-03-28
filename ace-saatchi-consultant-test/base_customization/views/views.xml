@@ -286,7 +286,7 @@
             <xpath expr="//field[@name='status_in_payment']" position="before">
                 <field name="x_amount_untaxed_in_company_currency" optional="hide" sum="Total"/>
                 <field name="x_excluded_billed_amount" optional="hide" sum="Total"/> 
-                <field name="x_billed_amount_adjustment" optional="show" sum="Total"/>         
+                <field name="x_billed_amount_adjustment" optional="hide" sum="Total"/>         
                  </xpath>
 
         </field>
