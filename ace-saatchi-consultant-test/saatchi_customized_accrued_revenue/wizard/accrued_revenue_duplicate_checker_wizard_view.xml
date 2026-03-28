@@ -7,9 +7,11 @@
     
     Features:
     - Default mode: Auto-generate for signed/billable SOs
-    - Special case mode: Three scenarios (Manual/Cancel/Adjustment)
+    - Special case mode: Three scenarios (Manual Accrue/Adjustment with reversal/Adjustment without reversal)
     - Visual indicators for duplicates (yellow highlighting)
     - Detailed view of existing accruals
+    - All amounts displayed in company currency (PHP)
+    - Select toggle: defaults based on existing accruals, resets on date change, preserves manual toggle
     -->
 
     <!-- ========== Wizard Form View ========== -->

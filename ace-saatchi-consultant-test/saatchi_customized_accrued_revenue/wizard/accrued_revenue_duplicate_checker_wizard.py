@@ -8,14 +8,23 @@ Features:
 - Default mode: Auto-generate accruals for signed/billable SOs
 - Special case mode: Three scenarios for flexible accrual creation
   * Scenario 1: Manual Accrue (override validation)
-  * Scenario 2: Cancel & Replace existing accruals
+  * Scenario 2: Adjustment Entry (with auto-reversal)
   * Scenario 3: Create adjustment entries (NO auto-reversal)
 
 Scenarios Explained:
 - Scenario 1: Creates accruals bypassing CE status validation
-- Scenario 2: Cancels existing accruals and replaces with new ones
+- Scenario 2: Creates adjustment entries alongside existing accruals (with auto-reversal)
 - Scenario 3: Creates adjustment entries to reduce previous accruals
               (Dr. Digital Income | Cr. Accrued Revenue) - NO auto-reversal
+
+Currency Handling:
+- All wizard line amounts are displayed and stored in company currency (PHP).
+- Foreign currency SOs (e.g. USD) are converted to PHP at wizard population time
+  using the SO's date_order as the conversion date.
+- The create_accrual (Select) toggle is a plain Boolean field:
+  * Set to False for SOs with existing accruals, True otherwise at creation time.
+  * Resets automatically when the accrual date changes (via onchange).
+  * Stays as manually toggled by the user after that - no compute overwrites it.
 """
 
 from odoo import models, fields, api, _
@@ -98,6 +107,9 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
             if record.accrual_date:
                 record.reversal_date = record.accrual_date + \
                     relativedelta(months=1, day=1)
+                # Reset create_accrual toggle based on updated existing accruals
+                for line in record.so_line_ids:
+                    line.create_accrual = not bool(line.existing_accrual_ids)
 
     # ========== Compute Methods ==========
 
@@ -799,7 +811,7 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
     amount_total = fields.Monetary(
         string="Accrual Amount",
         readonly=True,
-        help="Total amount to be accrued for this sale order"
+        help="Total amount to be accrued for this sale order (stored in company currency PHP)"
     )
 
     currency_id = fields.Many2one(
@@ -863,8 +875,6 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
         string="Select",
         default=False,
         help="Check to create accrual for this sale order",
-        store=True,
-        compute="_compute_create_accrual"
     )
 
     # ========== Compute Methods ==========
@@ -961,11 +971,3 @@ class SaatchiAccruedRevenueWizardLine(models.TransientModel):
                         amount, company_currency, record.company_id, conversion_date)
                 net_accrued += amount
             line.amount_left_to_accrue = so_amount_php - net_accrued
-
-    @api.depends('wizard_id.accrual_date')
-    def _compute_create_accrual(self):
-        for record in self:
-            if record.existing_accrual_ids:
-                record.create_accrual = False
-            else:
-                record.create_accrual = True

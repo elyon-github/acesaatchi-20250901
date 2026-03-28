@@ -377,7 +377,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 'year': ce_date.year if ce_date else None,
                 'month': ce_date.strftime('%B').upper() if ce_date else None,
                 'ce_status': ce_status,
-                'so_reference': '',
+                'so_reference': (so.name.upper() if so and so.name else ''),
                 'lines': [],
                 'sales_orders': set(),
             }
@@ -592,6 +592,21 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                     grouped[partner_name][ce_code]['ce_status'] = ce_status.upper(
                     ) if ce_status else ''
 
+                # Set SO Reference from SO name if not already set
+                if so.name and not grouped[partner_name][ce_code]['so_reference']:
+                    grouped[partner_name][ce_code]['so_reference'] = so.name.upper()
+
+        # Fallback: fill so_reference from tracked sales_orders if still empty
+        for partner_name, ces in grouped.items():
+            for ce_code, ce_data in ces.items():
+                if not ce_data['so_reference'] and ce_data['sales_orders']:
+                    so_records = self.env['sale.order'].browse(
+                        list(ce_data['sales_orders']))
+                    so_names = [s.name for s in so_records if s.name]
+                    if so_names:
+                        ce_data['so_reference'] = ', '.join(
+                            so_names).upper()
+
         return grouped
 
     def _calculate_amounts_by_type(self, lines, report_month):
@@ -694,34 +709,59 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
     def _get_cm_deduction_for_invoice(self, invoice):
         """Get the total credit memo deduction applied against an invoice.
-    
-        Returns the untaxed portion of the CM in company currency, to match
-        how the invoice billed amount is calculated (untaxed only).
+
+        Uses the actual reconciled amount (partial.amount) from
+        account.partial.reconcile — NOT the full CM total.  This ensures
+        that when only ₱0.01 of a ₱30k CM is reconciled against the
+        invoice, we deduct ₱0.01, not ₱30k.
+
+        For each partial reconcile involving a credit memo:
+        - If the CM was *fully* reconciled against this invoice
+          (partial.amount >= CM amount_residual before matching, i.e. the
+          CM amount_residual is now 0), we use the CM's untaxed amount
+          in company currency so the deduction matches the billed
+          calculation basis (untaxed).
+        - If the CM was only *partially* reconciled, we use
+          partial.amount (the actual reconciled amount in company
+          currency) as the deduction.
+
+        Returns:
+            float: total CM deduction amount (positive value)
         """
         cm_total = 0.0
-        company_currency = invoice.company_id.currency_id or self.env.company.currency_id
-    
+
         receivable_lines = invoice.line_ids.filtered(
             lambda l: l.account_id.account_type == 'asset_receivable'
         )
-    
+
         processed_cm_ids = set()
-    
+
         for line in receivable_lines:
             for partial in line.matched_credit_ids:
                 counterpart = partial.credit_move_id
                 cm_move = counterpart.move_id
                 if cm_move.move_type == 'out_refund' and cm_move.id not in processed_cm_ids:
                     processed_cm_ids.add(cm_move.id)
-                    cm_total += self._get_amount_untaxed_in_company_currency(cm_move)
-    
+                    # Check if the CM was fully applied to this invoice
+                    cm_total_amount = cm_move.amount_total_in_currency_signed
+                    if cm_total_amount and abs(partial.amount - abs(cm_total_amount)) < 0.02:
+                        # Fully reconciled — use untaxed amount for consistency
+                        cm_total += self._get_amount_untaxed_in_company_currency(cm_move)
+                    else:
+                        # Partially reconciled — only deduct what was actually applied
+                        cm_total += partial.amount
+
             for partial in line.matched_debit_ids:
                 counterpart = partial.debit_move_id
                 cm_move = counterpart.move_id
                 if cm_move.move_type == 'out_refund' and cm_move.id not in processed_cm_ids:
                     processed_cm_ids.add(cm_move.id)
-                    cm_total += self._get_amount_untaxed_in_company_currency(cm_move)
-    
+                    cm_total_amount = cm_move.amount_total_in_currency_signed
+                    if cm_total_amount and abs(partial.amount - abs(cm_total_amount)) < 0.02:
+                        cm_total += self._get_amount_untaxed_in_company_currency(cm_move)
+                    else:
+                        cm_total += partial.amount
+
         return cm_total
 
     def _calculate_billed_amount(self, sales_order_ids, report_month):
@@ -748,7 +788,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             float: Adjusted billed amount for posted invoices in the report month
         """
         if not sales_order_ids:
-            return 0.0
+            return 0.0, 0.0
 
         # Get the start and end of the report month
         month_start = report_month.replace(day=1)
@@ -760,27 +800,29 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         total_billed = 0.0
         total_exclusion = 0.0
+        total_cm_deduction = 0.0
         processed_invoice_ids = set()
 
         def _apply_invoice(inv):
-            """Calculate billed and exclusion for a single invoice.
+            """Calculate billed, exclusion, and CM deduction for a single invoice.
 
-            Billed = untaxed amount in company currency
-                     minus any credit memos reconciled as payment
+            Billed = untaxed amount in company currency minus CM deductions
             Exclusion = net amount on excluded accounts
+            CM deduction = credit memos reconciled as payment
 
-            Returns (billed_delta, exclusion_delta).
+            Returns (net_billed_delta, exclusion_delta, cm_deduction).
             """
-            billed_delta = self._get_amount_untaxed_in_company_currency(inv)
+            gross_billed = self._get_amount_untaxed_in_company_currency(inv)
 
-            # Subtract credit memos that were applied as payment
+            # Get credit memos that were applied as payment
             cm_deduction = self._get_cm_deduction_for_invoice(inv)
+            net_billed = gross_billed
             if cm_deduction:
                 _logger.info(
                     'Invoice %s: subtracting CM deduction %.2f from billed %.2f',
-                    inv.name, cm_deduction, billed_delta,
+                    inv.name, cm_deduction, gross_billed,
                 )
-                billed_delta -= cm_deduction
+                net_billed -= cm_deduction
 
             exclusion_delta = 0.0
             if excluded_account_ids:
@@ -788,7 +830,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                     if line.account_id and line.account_id.id in excluded_account_ids:
                         exclusion_delta += (line.credit or 0.0)
                         exclusion_delta -= (line.debit or 0.0)
-            return billed_delta, exclusion_delta
+            return net_billed, exclusion_delta, cm_deduction
 
         # Browse sales orders
         sales_orders = self.env['sale.order'].browse(list(sales_order_ids))
@@ -815,9 +857,10 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             )
             for move in moves:
                 processed_invoice_ids.add(move.id)
-                b_delta, e_delta = _apply_invoice(move)
+                b_delta, e_delta, cm_delta = _apply_invoice(move)
                 total_billed += b_delta
                 total_exclusion += e_delta
+                total_cm_deduction += cm_delta
 
         # ------------------------------------------------------------------
         # STEP 2: Find orphan invoices (not linked to ANY SO) whose
@@ -868,9 +911,10 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
                 # Include this orphan invoice
                 processed_invoice_ids.add(inv.id)
-                b_delta, e_delta = _apply_invoice(inv)
+                b_delta, e_delta, cm_delta = _apply_invoice(inv)
                 total_billed += b_delta
                 total_exclusion += e_delta
+                total_cm_deduction += cm_delta
                 if inv.name:
                     _logger.info(
                         'Included orphan invoice %s (old CE: %s) in billed calculation '
@@ -879,7 +923,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                         b_delta, e_delta, total_billed,
                     )
 
-        return total_billed - total_exclusion
+        return total_billed - total_exclusion, total_cm_deduction
 
     def generate_xlsx_report(self, workbook, data, docids):
         """
@@ -962,13 +1006,14 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.set_column(1, 1, 40)   # DESCRIPTION
         sheet.set_column(2, 2, 8)    # Year
         sheet.set_column(3, 3, 12)   # Month
-        sheet.set_column(4, 4, 18)   # BILLED
-        sheet.set_column(5, 5, 18)   # System Accrual
-        sheet.set_column(6, 6, 18)   # System Reversal
-        sheet.set_column(7, 7, 18)   # Manual Accrual
-        sheet.set_column(8, 8, 18)   # Manual Reversal
-        sheet.set_column(9, 9, 18)   # ADDL ADJ
-        sheet.set_column(10, 10, 15)  # Total
+        sheet.set_column(4, 4, 18)   # CM AMOUNT
+        sheet.set_column(5, 5, 18)   # BILLED
+        sheet.set_column(6, 6, 18)   # System Accrual
+        sheet.set_column(7, 7, 18)   # System Reversal
+        sheet.set_column(8, 8, 18)   # Manual Accrual
+        sheet.set_column(9, 9, 18)   # Manual Reversal
+        sheet.set_column(10, 10, 18)  # ADDL ADJ
+        sheet.set_column(11, 11, 15)  # Total
 
         # Write report header
         row = 0
@@ -982,7 +1027,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Write column headers
         headers = [
-            'CLIENT', 'DESCRIPTION', 'Year', 'Month', 'BILLED',
+            'CLIENT', 'DESCRIPTION', 'Year', 'Month', 'CM AMOUNT', 'BILLED',
             'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
             'ADDL ADJ', 'TOTAL'
         ]
@@ -1057,7 +1102,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 all_sales_orders.update(ce_data['sales_orders'])
 
             # Calculate billed amount for all sales orders of this customer
-            billed_amount = self._calculate_billed_amount(
+            billed_amount, cm_amount = self._calculate_billed_amount(
                 all_sales_orders, report_month)
 
             # Write customer row
@@ -1075,24 +1120,27 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             month_str = report_month.strftime('%B').upper()
             sheet.write(row, 3, month_str, formats['centered'])
 
-            # Write BILLED amount
-            sheet.write(row, 4, billed_amount, formats['currency_negative'])
+            # Write CM AMOUNT (informational, not included in TOTAL)
+            sheet.write(row, 4, -cm_amount if cm_amount else 0, formats['currency_negative'])
+
+            # Write BILLED amount (net, after CM deduction)
+            sheet.write(row, 5, billed_amount, formats['currency_negative'])
 
             sheet.write(
-                row, 5, total_amounts['system_accrual'], formats['currency_negative'])
+                row, 6, total_amounts['system_accrual'], formats['currency_negative'])
             sheet.write(
-                row, 6, total_amounts['system_reversal'], formats['currency_negative'])
+                row, 7, total_amounts['system_reversal'], formats['currency_negative'])
             sheet.write(
-                row, 7, total_amounts['manual_accrual'], formats['currency_negative'])
+                row, 8, total_amounts['manual_accrual'], formats['currency_negative'])
             sheet.write(
-                row, 8, total_amounts['manual_reversal'], formats['currency_negative'])
+                row, 9, total_amounts['manual_reversal'], formats['currency_negative'])
             sheet.write(
-                row, 9, total_amounts['addl_adj'], formats['currency_negative'])
+                row, 10, total_amounts['addl_adj'], formats['currency_negative'])
 
-            # Total formula
+            # Total formula (F+G+H+I+J+K = BILLED+accruals/reversals+ADDL ADJ, excludes CM AMOUNT)
             excel_row = row + 1
             sheet.write_formula(
-                row, 10, f'=E{excel_row}+F{excel_row}+G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}', formats['currency'])
+                row, 11, f'=F{excel_row}+G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}', formats['currency'])
 
             row += 1
 
@@ -1133,7 +1181,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # TOTAL label
         sheet.write(total_row, 3, 'TOTAL', bold_with_border)
 
-        # Sum formulas for monetary columns
+        # Sum formulas for monetary columns (E=CM AMOUNT, F=BILLED, G-K=accruals/reversals/adj, L=TOTAL)
         sheet.write_formula(
             total_row, 4, f'=SUM(E{data_start_row + 1}:E{total_row})', currency_negative_bold_format)
         sheet.write_formula(
@@ -1147,7 +1195,9 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.write_formula(
             total_row, 9, f'=SUM(J{data_start_row + 1}:J{total_row})', currency_negative_bold_format)
         sheet.write_formula(
-            total_row, 10, f'=SUM(K{data_start_row + 1}:K{total_row})', currency_bold_format)
+            total_row, 10, f'=SUM(K{data_start_row + 1}:K{total_row})', currency_negative_bold_format)
+        sheet.write_formula(
+            total_row, 11, f'=SUM(L{data_start_row + 1}:L{total_row})', currency_bold_format)
 
         return True
 
@@ -1172,19 +1222,20 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.set_column(3, 3, 40)   # DESCRIPTION
         sheet.set_column(4, 4, 8)    # Year
         sheet.set_column(5, 5, 12)   # Month
-        sheet.set_column(6, 6, 18)   # BILLED
-        sheet.set_column(7, 7, 18)   # System Accrual
-        sheet.set_column(8, 8, 18)   # System Reversal
-        sheet.set_column(9, 9, 18)   # Manual Accrual
-        sheet.set_column(10, 10, 18)  # Manual Reversal
-        sheet.set_column(11, 11, 18)  # ADDL ADJ
-        sheet.set_column(12, 12, 15)  # Total
-        sheet.set_column(13, 13, 20)  # CE Status
-        sheet.set_column(14, 14, 15)  # Per CSD
-        sheet.set_column(15, 15, 15)  # Variance
-        sheet.set_column(16, 16, 20)  # Cost to Client
-        sheet.set_column(17, 17, 20)  # For Revenue Adjustment
-        sheet.set_column(18, 18, 30)  # Remarks
+        sheet.set_column(6, 6, 18)   # CM AMOUNT
+        sheet.set_column(7, 7, 18)   # BILLED
+        sheet.set_column(8, 8, 18)   # System Accrual
+        sheet.set_column(9, 9, 18)   # System Reversal
+        sheet.set_column(10, 10, 18)  # Manual Accrual
+        sheet.set_column(11, 11, 18)  # Manual Reversal
+        sheet.set_column(12, 12, 18)  # ADDL ADJ
+        sheet.set_column(13, 13, 15)  # Total
+        sheet.set_column(14, 14, 20)  # CE Status
+        sheet.set_column(15, 15, 15)  # Per CSD
+        sheet.set_column(16, 16, 15)  # Variance
+        sheet.set_column(17, 17, 20)  # Cost to Client
+        sheet.set_column(18, 18, 20)  # For Revenue Adjustment
+        sheet.set_column(19, 19, 30)  # Remarks
 
         # Write report header
         row = 0
@@ -1199,8 +1250,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Write column headers
         headers = [
-            'CE#', 'SO REFERENCE', 'CE DATE', 'DESCRIPTION', 'Year', 'Month', 'BILLED',
-            'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
+            'CE#', 'SO REFERENCE', 'CE DATE', 'DESCRIPTION', 'Year', 'Month', 'CM AMOUNT',
+            'BILLED', 'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
             'ADDL ADJ', 'TOTAL', 'CE STATUS', 'PER CSD', 'VARIANCE',
             f'COST TO CLIENT - {cost_to_client_month}', 'FOR REVENUE ADJUSTMENT', 'REMARKS'
         ]
@@ -1218,8 +1269,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             amounts = self._calculate_amounts_by_type(
                 ce_data['lines'], report_month)
 
-            # Calculate billed amount for this CE's sales orders
-            billed_amount = self._calculate_billed_amount(
+            # Calculate billed amount and CM deduction for this CE's sales orders
+            billed_amount, cm_amount = self._calculate_billed_amount(
                 ce_data['sales_orders'], report_month)
 
             sheet.write(row, 0, ce_code, formats['centered'])
@@ -1244,8 +1295,11 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             else:
                 sheet.write(row, 5, '', formats['centered'])
 
-            # Write BILLED amount
-            sheet.write(row, 6, billed_amount, formats['currency_negative'])
+            # Write CM AMOUNT (col G, index 6) - informational, not in TOTAL
+            sheet.write(row, 6, -cm_amount if cm_amount else 0, formats['currency_negative'])
+
+            # Write BILLED amount (col H, index 7) - net, after CM deduction
+            sheet.write(row, 7, billed_amount, formats['currency_negative'])
 
             # Apply reversal OB fallback for this CE.
             # Try the CE code first, then fall back to x_studio_old_ce
@@ -1270,40 +1324,40 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 manual_reversal_val = rev_ob['manual_reversal']
             manual_reversal_val -= rev_ob.get('manual_reversal_adjustment', 0)
 
-            sheet.write(row, 7, amounts['system_accrual'],
+            sheet.write(row, 8, amounts['system_accrual'],
                         formats['currency_negative'])
-            sheet.write(row, 8, system_reversal_val,
+            sheet.write(row, 9, system_reversal_val,
                         formats['currency_negative'])
-            sheet.write(row, 9, amounts['manual_accrual'],
+            sheet.write(row, 10, amounts['manual_accrual'],
                         formats['currency_negative'])
-            sheet.write(row, 10, manual_reversal_val,
+            sheet.write(row, 11, manual_reversal_val,
                         formats['currency_negative'])
-            sheet.write(row, 11, amounts['addl_adj'],
+            sheet.write(row, 12, amounts['addl_adj'],
                         formats['currency_negative'])
 
-            # Total formula (includes BILLED + accruals/reversals + ADDL ADJ: G+H+I+J+K+L which is columns 6-11)
+            # Total formula (H+I+J+K+L+M = BILLED+accruals/reversals+ADDL ADJ, excludes CM AMOUNT)
             excel_row = row + 1
             sheet.write_formula(
-                row, 12, f'=G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}+L{excel_row}', formats['currency'])
+                row, 13, f'=H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}+L{excel_row}+M{excel_row}', formats['currency'])
 
-            sheet.write(row, 13, ce_data['ce_status'], formats['centered'])
+            sheet.write(row, 14, ce_data['ce_status'], formats['centered'])
 
             # PER CSD - empty for user input
-            sheet.write(row, 14, '', formats['currency'])
+            sheet.write(row, 15, '', formats['currency'])
 
-            # VARIANCE formula: Total - Per CSD (M - O which is 12 - 14)
+            # VARIANCE formula: Total - Per CSD (N - P)
             sheet.write_formula(
-                row, 15, f'=M{excel_row}-O{excel_row}', formats['currency'])
+                row, 16, f'=N{excel_row}-P{excel_row}', formats['currency'])
 
             # COST TO CLIENT - empty for user input
-            sheet.write(row, 16, '', formats['currency'])
+            sheet.write(row, 17, '', formats['currency'])
 
-            # FOR REVENUE ADJUSTMENT formula: Variance - Cost to Client (P - Q which is 15 - 16)
+            # FOR REVENUE ADJUSTMENT formula: Variance - Cost to Client (Q - R)
             sheet.write_formula(
-                row, 17, f'=P{excel_row}-Q{excel_row}', formats['currency'])
+                row, 18, f'=Q{excel_row}-R{excel_row}', formats['currency'])
 
             # REMARKS - empty for user input
-            sheet.write(row, 18, '', formats['normal'])
+            sheet.write(row, 19, '', formats['normal'])
 
             row += 1
 
@@ -1344,7 +1398,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # TOTAL label
         sheet.write(total_row, 5, 'TOTAL', bold_with_border)
 
-        # Sum formulas for monetary columns
+        # Sum formulas for monetary columns (G=CM AMOUNT, H=BILLED, I-M=accruals/reversals/adj, N=TOTAL)
         sheet.write_formula(
             total_row, 6, f'=SUM(G{data_start_row + 1}:G{total_row})', currency_negative_bold_format)
         sheet.write_formula(
@@ -1358,28 +1412,30 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.write_formula(
             total_row, 11, f'=SUM(L{data_start_row + 1}:L{total_row})', currency_negative_bold_format)
         sheet.write_formula(
-            total_row, 12, f'=SUM(M{data_start_row + 1}:M{total_row})', currency_bold_format)
+            total_row, 12, f'=SUM(M{data_start_row + 1}:M{total_row})', currency_negative_bold_format)
+        sheet.write_formula(
+            total_row, 13, f'=SUM(N{data_start_row + 1}:N{total_row})', currency_bold_format)
 
         # Empty CE Status cell
-        sheet.write(total_row, 13, '', formats['section_header_no_border'])
+        sheet.write(total_row, 14, '', formats['section_header_no_border'])
 
         # Sum for PER CSD
         sheet.write_formula(
-            total_row, 14, f'=SUM(O{data_start_row + 1}:O{total_row})', currency_bold_format)
+            total_row, 15, f'=SUM(P{data_start_row + 1}:P{total_row})', currency_bold_format)
 
         # Sum for VARIANCE
         sheet.write_formula(
-            total_row, 15, f'=SUM(P{data_start_row + 1}:P{total_row})', currency_bold_format)
+            total_row, 16, f'=SUM(Q{data_start_row + 1}:Q{total_row})', currency_bold_format)
 
         # Sum for COST TO CLIENT
         sheet.write_formula(
-            total_row, 16, f'=SUM(Q{data_start_row + 1}:Q{total_row})', currency_bold_format)
+            total_row, 17, f'=SUM(R{data_start_row + 1}:R{total_row})', currency_bold_format)
 
         # Sum for FOR REVENUE ADJUSTMENT
         sheet.write_formula(
-            total_row, 17, f'=SUM(R{data_start_row + 1}:R{total_row})', currency_bold_format)
+            total_row, 18, f'=SUM(S{data_start_row + 1}:S{total_row})', currency_bold_format)
 
         # Empty REMARKS cell
-        sheet.write(total_row, 18, '', formats['section_header_no_border'])
+        sheet.write(total_row, 19, '', formats['section_header_no_border'])
 
         return True

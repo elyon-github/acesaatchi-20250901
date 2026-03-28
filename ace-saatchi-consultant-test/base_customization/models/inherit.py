@@ -568,6 +568,39 @@ class AccountMove(models.Model):
         compute="_compute_x_alt_currency_id",
         string="Alt Currency"
     )
+
+    x_amount_untaxed_in_company_currency = fields.Monetary(
+        string="Tax Excluded in Company Currency",
+        currency_field="company_currency_id",
+        digits=(12, 2),
+        compute="_compute_amount_untaxed_in_company_currency",
+        store=True,
+        help="Tax excluded amount always in company currency (PHP), converted from invoice currency if needed"
+    )
+
+    x_excluded_billed_amount = fields.Monetary(
+        string="Excluded Billed Amount",
+        currency_field="company_currency_id",
+        digits=(12, 2),
+        compute="_compute_excluded_billed_amount",
+        store=True,
+        help="Total amount from journal items posted to excluded billed accounts (as configured in accrual configuration)"
+    )
+
+    x_billed_amount_adjustment = fields.Monetary(
+        string="Billed Amount (For Adjustment XLSX)",
+        currency_field="company_currency_id",
+        digits=(12, 2),
+        compute="_compute_billed_amount_adjustment",
+        store=True,
+        help="Adjusted billed amount = Tax Excluded in Company Currency - Excluded Billed Amount"
+    )
+
+    company_currency_id = fields.Many2one(
+        'res.currency',
+        related='company_id.currency_id',
+        readonly=True
+    )
     
     def get_parsed_table_notes(self):
         """Parse x_studio_table_note HTML to extract tables by line number
@@ -679,7 +712,11 @@ class AccountMove(models.Model):
             record.x_related_so = sale_order
 
     def _apply_alt_currency_conversion(self):
-        """Update all invoice lines with fx_currency and converted price."""
+        """
+        Update invoice lines with fx_currency and converted price.
+        Only populate fx_price_unit for invoices in company currency (PHP).
+        For foreign currency invoices, alt amount is computed from journal items instead.
+        """
         for record in self:
             # Determine which alt currency to use
             alt_currency = record.x_related_so.x_alt_currency_id if record.x_related_so else None
@@ -689,14 +726,21 @@ class AccountMove(models.Model):
             if not alt_currency:
                 continue
 
-            for line in record.invoice_line_ids:
-                line.fx_currency_id = alt_currency
-                line.fx_price_unit = line.currency_id._convert(
-                    line.price_unit,
-                    alt_currency,
-                    record.company_id or record.env.company,
-                    record.x_related_so.date_order if record.x_related_so else (line.purchase_order_id.date_order if line.purchase_order_id else record.date)
-                )
+            # Only populate fx_price_unit for invoices in company currency (PHP)
+            # Foreign currency invoices use journal items (already converted to PHP)
+            if record.currency_id == record.company_id.currency_id:
+                for line in record.invoice_line_ids:
+                    line.fx_currency_id = alt_currency
+                    line.fx_price_unit = line.currency_id._convert(
+                        line.price_unit,
+                        alt_currency,
+                        record.company_id or record.env.company,
+                        record.x_related_so.date_order if record.x_related_so else (line.purchase_order_id.date_order if line.purchase_order_id else record.date)
+                    )
+            else:
+                # For foreign currency invoices, just set the alt currency on lines
+                for line in record.invoice_line_ids:
+                    line.fx_currency_id = alt_currency
 
     @api.depends('name')
     def _compute_x_alt_currency_id(self):
@@ -704,9 +748,13 @@ class AccountMove(models.Model):
             if record.invoice_line_ids:
                 record.x_alt_currency_id = record.invoice_line_ids[0].fx_currency_id
 
-    @api.depends('invoice_line_ids.fx_price_unit', 'invoice_line_ids.fx_currency_id', 'state')
+    @api.depends('invoice_line_ids.fx_price_unit', 'invoice_line_ids.fx_currency_id', 'line_ids.credit', 'state', 'currency_id')
     def _compute_alt_currency_amount(self):
-        """Compute the total alt amount by converting fx_price_unit to alt_currency."""
+        """
+        Compute the total alt amount:
+        - If invoice currency != company currency (PHP), sum all journal item credits (already in PHP).
+        - If invoice currency == company currency, use invoice lines as before.
+        """
         for record in self:
             total = 0.0
             alt_currency = record.x_alt_currency_id or record.company_id.currency_id
@@ -715,18 +763,98 @@ class AccountMove(models.Model):
                 record.x_alt_currency_amount = 0
                 continue
 
-            for line in record.invoice_line_ids:
-                fx_currency = line.fx_currency_id or record.currency_id
-                fx_price = line.fx_price_unit or 0.0
+            # Check if invoice currency is different from company currency (PHP)
+            if record.currency_id != record.company_id.currency_id:
+                # Foreign currency invoice - sum all journal items' credit (already in PHP)
+                for line in record.line_ids:
+                    total += line.credit
+            else:
+                # PHP invoice - use invoice lines as before
+                for line in record.invoice_line_ids:
+                    fx_currency = line.fx_currency_id or record.currency_id
+                    fx_price = line.fx_price_unit or 0.0
 
-                total += fx_currency._convert(
-                    fx_price * line.quantity,
-                    alt_currency,
-                    record.company_id,
-                    record.x_related_so.date_order or fields.Date.today()
-                )
+                    total += fx_currency._convert(
+                        fx_price * line.quantity,
+                        alt_currency,
+                        record.company_id,
+                        record.x_related_so.date_order or fields.Date.today()
+                    )
             record.x_alt_currency_amount = total
 
+    @api.depends('amount_untaxed', 'line_ids.credit', 'currency_id', 'company_id.currency_id', 'date', 'state')
+    def _compute_amount_untaxed_in_company_currency(self):
+        """
+        Compute tax excluded amount always in company currency (PHP).
+        - If invoice currency == company currency (PHP): use amount_untaxed as-is
+        - If invoice currency != company currency (USD, etc.): sum journal items' credit (already in PHP)
+        """
+        for record in self:
+            if record.currency_id == record.company_id.currency_id:
+                # Invoice is already in PHP
+                record.x_amount_untaxed_in_company_currency = record.amount_untaxed
+            else:
+                # Foreign currency invoice - sum journal items' credit (already in PHP)
+                total = 0.0
+                for line in record.line_ids:
+                    total += line.credit
+                record.x_amount_untaxed_in_company_currency = total
+
+    def _get_excluded_billed_account_ids(self):
+        """Get the set of account IDs to exclude from billed amount calculation.
+        
+        Reads from the saatchi.accrual_config Many2many field
+        'excluded_billed_account_ids' for the current company.
+        
+        Returns:
+            set: Set of account IDs to exclude
+        """
+        try:
+            config = self.env['saatchi.accrual_config'].sudo().search([
+                ('company_id', '=', self.company_id.id)
+            ], limit=1)
+            if config and config.excluded_billed_account_ids:
+                return set(config.excluded_billed_account_ids.ids)
+        except Exception:
+            pass
+        return set()
+
+    @api.depends('line_ids.account_id', 'line_ids.credit', 'line_ids.debit', 'state')
+    def _compute_excluded_billed_amount(self):
+        """
+        Compute the total amount from journal items posted to excluded billed accounts.
+        
+        For each journal item line in an excluded account:
+          Total = sum of (credit - debit) for all lines in excluded accounts
+        
+        This matches the logic used in the adjustment report for identifying
+        excluded billed amounts.
+        """
+        for record in self:
+            excluded_account_ids = record._get_excluded_billed_account_ids()
+            
+            if not excluded_account_ids:
+                record.x_excluded_billed_amount = 0.0
+                continue
+            
+            total_exclusion = 0.0
+            for line in record.line_ids:
+                if line.account_id and line.account_id.id in excluded_account_ids:
+                    # Sum credit - debit for excluded accounts
+                    total_exclusion += (line.credit or 0.0) - (line.debit or 0.0)
+            
+            record.x_excluded_billed_amount = total_exclusion
+
+    @api.depends('x_amount_untaxed_in_company_currency', 'x_excluded_billed_amount')
+    def _compute_billed_amount_adjustment(self):
+        """
+        Compute adjusted billed amount in company currency (PHP).
+        Formula: Tax Excluded in Company Currency - Excluded Billed Amount
+        
+        This represents the actual billed amount after removing excluded accounts.
+        """
+        for record in self:
+            record.x_billed_amount_adjustment = record.x_amount_untaxed_in_company_currency - record.x_excluded_billed_amount
 
 
 # BIR Report Customizations

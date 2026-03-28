@@ -319,11 +319,14 @@ class SaleOrder(models.Model):
 
     def action_open_wizard_create_accrued_revenue(self, records, special_case=False):
         """
-        Open wizard to create accrued revenue for selected sale orders
+        Open wizard to create accrued revenue for selected sale orders.
+
+        Amounts are converted from SO currency to company currency (PHP) at population time.
+        The Select toggle defaults to False for SOs with existing accruals, True otherwise.
 
         Args:
             records: Sale order recordset
-            special_case: If True, enables scenario selection (Manual/Cancel/Adjustment)
+            special_case: If True, enables scenario selection (Manual Accrue/Adjustment)
 
         Returns:
             dict: Action to open wizard
@@ -339,6 +342,7 @@ class SaleOrder(models.Model):
             'special_case_mode': special_case,
         })
 
+        company_currency = self.env.company.currency_id
         for record in records:
             if (record.x_ce_variance_revenue > 0 or special_case) and record.state == 'sale':
                 existing = self.env['saatchi.accrued_revenue'].search([
@@ -348,13 +352,23 @@ class SaleOrder(models.Model):
                     ('state', 'in', ['draft', 'accrued', 'reversed'])
                 ])
 
+                # Use _calculate_accrual_amount for consistency with other paths
+                amount_total = record._calculate_accrual_amount(
+                    accrual_date=accrual_date)
+
+                # Convert to company currency (PHP) if SO is in foreign currency
+                if record.currency_id != company_currency and amount_total:
+                    date_order = record.date_order.date() if record.date_order else accrual_date
+                    amount_total = record.currency_id._convert(
+                        amount_total, company_currency, record.company_id, date_order)
+
                 self.env['saatchi.accrued_revenue.wizard.line'].create({
                     'wizard_id': wizard.id,
                     'sale_order_id': record.id,
-                    'amount_total': record.x_ce_variance_revenue,
+                    'amount_total': amount_total,
                     'has_existing_accrual': bool(existing),
                     'existing_accrual_ids': [(6, 0, existing.ids)],
-                    'create_accrual': True,
+                    'create_accrual': not bool(existing),
                 })
 
         return {
@@ -372,7 +386,7 @@ class SaleOrder(models.Model):
 
     def _calculate_accrual_amount(self, accrual_date=None):
         """
-        Calculate total accrual amount for this sale order
+        Calculate total accrual amount for this sale order (in SO currency).
 
         Only processes Agency Charges category lines that have:
         - Delivered but not invoiced quantity (accrued_qty > 0)
@@ -382,12 +396,15 @@ class SaleOrder(models.Model):
         This ensures accurate historical accrual
         (e.g., Jan accrual won't be affected by Feb invoices).
 
+        Note: Returns amount in the SO's own currency. Callers are responsible
+        for converting to company currency (PHP) if needed.
+
         Args:
             accrual_date: Optional date to filter invoices by.
                          If None, uses current qty_invoiced (backwards compatible).
 
         Returns:
-            float: Total accrual amount
+            float: Total accrual amount in SO currency
         """
         self.ensure_one()
         amount_total = 0
