@@ -610,11 +610,20 @@ class SaleOrder(models.Model):
             if not analytic_distribution and hasattr(self, 'analytic_distribution') and self.analytic_distribution:
                 analytic_distribution = self.analytic_distribution
 
-            # Default to analytic account ID 2 if still no distribution found
+            # Default to "AGENCIES" analytic account for target company if still no distribution found
             if not analytic_distribution:
-                analytic_distribution = {2: 100}
-                _logger.debug(
-                    f"Using default analytic account (ID: 2) for line {line.name}")
+                agencies_account = self.env['account.analytic.account'].sudo().search([
+                    ('name', '=', 'AGENCIES'),
+                    ('company_id', '=', target_company.id)
+                ], limit=1)
+                if agencies_account:
+                    analytic_distribution = {agencies_account.id: 100}
+                    _logger.debug(
+                        f"Using default AGENCIES analytic account (ID: {agencies_account.id}) for line {line.name}")
+                else:
+                    _logger.warning(
+                        f"No AGENCIES analytic account found for company {target_company.name}. Skipping analytic distribution for line {line.name}")
+                    analytic_distribution = {}
 
             # Get income account from product
             template_income_account = line.product_id.property_account_income_id or \
