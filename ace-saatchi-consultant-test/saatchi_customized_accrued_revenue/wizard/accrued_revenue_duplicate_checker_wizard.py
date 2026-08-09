@@ -289,7 +289,7 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
             # Return early - no point checking other validations if CE codes are missing
             return errors
 
-        # ========== SCENARIO-SPECIFIC VALIDATIONS ==========
+        # ========== SCENARIO-SPECIFIC VALIDATIONS ============
 
         if self.accrual_scenario == 'scenario_1':
             # Filter lines where ANY existing accrual is draft or accrued
@@ -308,60 +308,7 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
                     'Scenario 1 can only be used for Sale Orders without any existing accruals.'
                 ) % so_list)
 
-        if self.accrual_scenario == 'scenario_2':
-            # Scenario 2: Only SOs with existing accruals in 'accrued' or 'reversed' state
-            sos_without_accrued = []
-            for line in selected_lines:
-                accrued_records = line.existing_accrual_ids.filtered(
-                    lambda a: a.state == 'reversed' or a.state == 'accrued')
-                if not accrued_records:
-                    sos_without_accrued.append(line.sale_order_id.name)
 
-            if sos_without_accrued:
-                so_list = '\n'.join(f'  • {so}' for so in sos_without_accrued)
-                errors.append(_(
-                    'Scenario 2 Error\n\n'
-                    'The following Sale Orders have no posted accruals to adjust:\n\n'
-                    '%s\n\n'
-                    'Scenario 2 requires existing accruals in "Accrued" or "Reversed" state.'
-                ) % so_list)
-
-        elif self.accrual_scenario == 'scenario_3':
-            # Scenario 3: Only SOs with existing accruals (must have at least one "accrued" entry)
-            sos_without_existing = []
-            sos_without_accrued = []
-
-            for line in selected_lines:
-                # 1. No existing accruals at all
-                if not line.existing_accrual_ids:
-                    sos_without_existing.append(line.sale_order_id.name)
-                    continue
-
-                # 2. Has accruals but none are in "accrued" state
-                accrued_records = line.existing_accrual_ids.filtered(
-                    lambda a: a.state == 'reversed' or a.state == 'accrued')
-                if not accrued_records:
-                    sos_without_accrued.append(line.sale_order_id.name)
-
-            # --- Error 1: SOs with NO accruals at all ---
-            if sos_without_existing:
-                so_list = '\n'.join(f'  • {so}' for so in sos_without_existing)
-                errors.append(_(
-                    'Scenario 3 Error\n\n'
-                    'The following Sale Orders have no existing accruals:\n\n'
-                    '%s\n\n'
-                    'Scenario 3 creates adjustment entries and requires existing accruals to adjust.'
-                ) % so_list)
-
-            # --- Error 2: SOs with accruals but none in "accrued" state ---
-            if sos_without_accrued:
-                so_list = '\n'.join(f'  • {so}' for so in sos_without_accrued)
-                errors.append(_(
-                    'Scenario 3 Error\n\n'
-                    'The following Sale Orders have no posted accruals:\n\n'
-                    '%s\n\n'
-                    'Scenario 3 requires accruals in "Accrued" state. Draft or cancelled accruals cannot be adjusted.'
-                ) % so_list)
 
         return errors
 
@@ -586,16 +533,6 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
 
         for line in selected_lines:
             try:
-                # Verify existing accruals exist (already validated, but double-check)
-                accrued_records = line.existing_accrual_ids.filtered(
-                    lambda a: a.state == 'accrued' or a.state == 'reversed')
-
-                if not accrued_records:
-                    skipped_no_accrued.append(
-                        f"{line.sale_order_id.name} (No posted accruals found)")
-                    _logger.warning(
-                        f"⚠ Scenario 2: Skipped SO {line.sale_order_id.name} - no accrued state records to adjust")
-                    continue
 
                 if not line.adjustment_amount:
                     failed_sos.append(
@@ -679,12 +616,6 @@ class SaatchiAccruedRevenueWizard(models.TransientModel):
 
         for line in selected_lines:
             try:
-                # Only create adjustment if existing accruals exist
-                if not line.existing_accrual_ids:
-                    skipped_count += 1
-                    _logger.warning(
-                        f"⚠ Scenario 3: Skipped SO {line.sale_order_id.name} - no existing accruals")
-                    continue
 
                 if not line.adjustment_amount:
                     failed_sos.append(

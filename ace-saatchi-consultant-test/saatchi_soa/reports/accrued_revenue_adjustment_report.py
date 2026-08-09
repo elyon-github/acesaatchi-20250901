@@ -10,6 +10,34 @@ from collections import defaultdict
 _logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# FEATURE SWITCH: excluded-account handling in the BILLED column.
+#
+# When True (the original behaviour), journal items posted to the accounts
+# listed in saatchi.accrual_config.excluded_billed_account_ids are netted out
+# of the BILLED figure.  In this database those are, per company:
+#     1218  Unbilled Charges_WIP             (asset_current)
+#     4310  Rental Income                    (income_other)
+#     4112  Cost of Services - Unbilled WIP  (expense_direct_cost)
+#
+# Set to False on 2026-08-09 at the client's request -- BILLED is now reported
+# GROSS, with no account exclusions applied anywhere in this report.
+#
+# To re-enable, flip this back to True.  That is the ONLY change required:
+#   * the saatchi.accrual_config records were deliberately left untouched, and
+#   * every consumer of _get_excluded_billed_account_ids() guards its exclusion
+#     branch with `if excluded_account_ids:` -- namely _calculate_billed_amount
+#     (both _apply_invoice and the STEP 3 credit-memo branch) and
+#     _build_pnl_billed_map -- so the whole mechanism switches on and off here.
+#
+# NOTE for future devs: base_customization/models/inherit.py has its own,
+# separate _get_excluded_billed_account_ids() feeding the stored fields
+# x_excluded_billed_amount / x_billed_amount_adjustment on account.move.  Those
+# fields are NOT read by this report and are unaffected by this switch.
+# ---------------------------------------------------------------------------
+EXCLUDE_BILLED_ACCOUNTS = False
+
+
 class SalesOrderRevenueXLSX(models.AbstractModel):
     _name = 'report.sales_order_revenue_xlsx'
     _inherit = 'report.report_xlsx.abstract'
@@ -162,6 +190,30 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         if not ce_code:
             return ''
         return re.sub(r'\s+', '', ce_code.strip().upper())
+
+    def _normalize_ce_code_loose(self, ce_code):
+        """Last-resort CE normalisation: strip EVERY non-alphanumeric character.
+
+        `_normalize_ce_code` removes whitespace only, so it keeps separators --
+        which means an invoice written 'PJB 0178-1' and a credit note written
+        'PJB0178 1' normalise to 'PJB0178-1' and 'PJB01781' and never match.
+        That silently dropped the credit note from the BILLED column
+        (P&G Philippines, July 2026: billed overstated by 49,407.25).
+
+        Used ONLY as a fallback for credit notes that matched nothing under the
+        strict rule -- never as the primary comparison -- because collapsing
+        separators is deliberately loose and could otherwise merge genuinely
+        different CE codes (e.g. 'ABC-1' and 'ABC1').
+
+        Args:
+            ce_code (str): raw CE code
+
+        Returns:
+            str: uppercased, alphanumerics only ('PJB 0178-1' -> 'PJB01781')
+        """
+        if not ce_code:
+            return ''
+        return re.sub(r'[^A-Za-z0-9]', '', ce_code).upper()
 
     def _get_opening_balance_cutoff_date(self):
         """Get the opening balance cutoff date from the accrual configuration."""
@@ -317,6 +369,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # recognised as duplicates of existing SO rows (e.g. BLFSO000211
         # whose x_studio_old_ce == "BLF 00004").
         existing_normalized_ces = set()
+
         for partner_name, ces in grouped_data.items():
             for ce_code_key in ces.keys():
                 existing_normalized_ces.add(
@@ -475,12 +528,13 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         return name if name else 'UNNAMED'
 
-    def _group_lines_by_ce(self, lines, report_month, all_billed_so_ids=None):
+    def _group_lines_by_ce(self, lines, report_month, all_billed_so_ids=None, standalone_invoice_ids=None):
         """Group account.move.line records by partner and CE code
 
         Includes:
         - Lines from accrued revenue entries
         - ALL sales orders that were billed in the report month (whether they have accrued entries or not)
+        - Standalone invoices: posted invoices with x_studio_old_ce_1 set but no matching SO
         """
         grouped = defaultdict(lambda: defaultdict(lambda: {
             'ce_date': None,
@@ -490,7 +544,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             'ce_status': '',
             'so_reference': '',
             'lines': [],
-            'sales_orders': set()
+            'sales_orders': set(),
+            'direct_invoices': set(),
         }))
 
         # Calculate date ranges
@@ -607,6 +662,21 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                         ce_data['so_reference'] = ', '.join(
                             so_names).upper()
 
+        # Standalone invoices: posted out_invoices with x_studio_old_ce_1 set
+        # but no matching SO. Create CE rows directly from them.
+        if standalone_invoice_ids:
+            standalone_invoices = self.env['account.move'].browse(standalone_invoice_ids)
+            for inv in standalone_invoices:
+                if not inv.partner_id or not inv.x_studio_old_ce_1:
+                    continue
+                partner_name = inv.partner_id.name.upper()
+                ce_code = inv.x_studio_old_ce_1.upper()
+                grouped[partner_name][ce_code]['direct_invoices'].add(inv.id)
+                if inv.invoice_date and not grouped[partner_name][ce_code]['ce_date']:
+                    grouped[partner_name][ce_code]['ce_date'] = inv.invoice_date
+                    grouped[partner_name][ce_code]['year'] = inv.invoice_date.year
+                    grouped[partner_name][ce_code]['month'] = inv.invoice_date.strftime('%B').upper()
+
         return grouped
 
     def _calculate_amounts_by_type(self, lines, report_month):
@@ -661,7 +731,20 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         Reads from the saatchi.accrual_config Many2many field
         'excluded_billed_account_ids' for the current company.
+
+        Currently DISABLED -- returns an empty set unless the module-level
+        EXCLUDE_BILLED_ACCOUNTS switch is turned back on.  See the comment block
+        at the top of this file for the full rationale and how to re-enable.
+
+        Returns:
+            set: account IDs to exclude (empty while the switch is off)
         """
+        if not EXCLUDE_BILLED_ACCOUNTS:
+            # Switch is off: returning an empty set makes every caller skip its
+            # `if excluded_account_ids:` branch, so BILLED is reported gross.
+            # The config records below are still read when the switch is on.
+            return set()
+
         try:
             config = self.env['saatchi.accrual_config'].sudo().search([
                 ('company_id', '=', self.env.company.id)
@@ -707,8 +790,11 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # (positive for invoices, negated for credit memos).
         return abs(total_balance)
 
-    def _get_cm_deduction_for_invoice(self, invoice):
+    def _get_cm_deduction_for_invoice(self, invoice, report_month):
         """Get the total credit memo deduction applied against an invoice.
+
+        Only considers credit memos that fall within the same report month
+        (based on invoice_date) to ensure month-specific revenue adjustments.
 
         Uses the actual reconciled amount (partial.amount) from
         account.partial.reconcile — NOT the full CM total.  This ensures
@@ -725,9 +811,18 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
           partial.amount (the actual reconciled amount in company
           currency) as the deduction.
 
+        Args:
+            invoice: account.move record (the invoice)
+            report_month: date object representing the report month
+
         Returns:
             float: total CM deduction amount (positive value)
         """
+        # Get the start and end of the report month
+        month_start = report_month.replace(day=1)
+        month_end = (month_start + relativedelta(months=1)) - \
+            relativedelta(days=1)
+
         cm_total = 0.0
 
         receivable_lines = invoice.line_ids.filtered(
@@ -740,13 +835,17 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             for partial in line.matched_credit_ids:
                 counterpart = partial.credit_move_id
                 cm_move = counterpart.move_id
-                if cm_move.move_type == 'out_refund' and cm_move.id not in processed_cm_ids:
+                if (cm_move.move_type == 'out_refund' and
+                    cm_move.id not in processed_cm_ids and
+                    cm_move.invoice_date and
+                        month_start <= cm_move.invoice_date <= month_end):
                     processed_cm_ids.add(cm_move.id)
                     # Check if the CM was fully applied to this invoice
                     cm_total_amount = cm_move.amount_total_in_currency_signed
                     if cm_total_amount and abs(partial.amount - abs(cm_total_amount)) < 0.02:
                         # Fully reconciled — use untaxed amount for consistency
-                        cm_total += self._get_amount_untaxed_in_company_currency(cm_move)
+                        cm_total += self._get_amount_untaxed_in_company_currency(
+                            cm_move)
                     else:
                         # Partially reconciled — only deduct what was actually applied
                         cm_total += partial.amount
@@ -754,17 +853,22 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             for partial in line.matched_debit_ids:
                 counterpart = partial.debit_move_id
                 cm_move = counterpart.move_id
-                if cm_move.move_type == 'out_refund' and cm_move.id not in processed_cm_ids:
+                if (cm_move.move_type == 'out_refund' and
+                    cm_move.id not in processed_cm_ids and
+                    cm_move.invoice_date and
+                        month_start <= cm_move.invoice_date <= month_end):
                     processed_cm_ids.add(cm_move.id)
                     cm_total_amount = cm_move.amount_total_in_currency_signed
                     if cm_total_amount and abs(partial.amount - abs(cm_total_amount)) < 0.02:
-                        cm_total += self._get_amount_untaxed_in_company_currency(cm_move)
+                        cm_total += self._get_amount_untaxed_in_company_currency(
+                            cm_move)
                     else:
                         cm_total += partial.amount
 
-        return cm_total
+        return cm_total, processed_cm_ids
 
-    def _calculate_billed_amount(self, sales_order_ids, report_month):
+    def _calculate_billed_amount(self, sales_order_ids, report_month, direct_invoice_ids=None,
+                                 consumed_move_ids=None):
         """Calculate total billed amount for given sales orders in the report month.
 
         Logic:
@@ -783,11 +887,13 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         Args:
             sales_order_ids: set of sale.order IDs
             report_month: date object representing the report month
+            direct_invoice_ids: set of account.move IDs for standalone invoices
+                                 (have x_studio_old_ce_1 but no matching SO)
 
         Returns:
             float: Adjusted billed amount for posted invoices in the report month
         """
-        if not sales_order_ids:
+        if not sales_order_ids and not direct_invoice_ids:
             return 0.0, 0.0
 
         # Get the start and end of the report month
@@ -802,6 +908,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         total_exclusion = 0.0
         total_cm_deduction = 0.0
         processed_invoice_ids = set()
+        processed_cm_ids = set()
 
         def _apply_invoice(inv):
             """Calculate billed, exclusion, and CM deduction for a single invoice.
@@ -815,7 +922,9 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             gross_billed = self._get_amount_untaxed_in_company_currency(inv)
 
             # Get credit memos that were applied as payment
-            cm_deduction = self._get_cm_deduction_for_invoice(inv)
+            cm_deduction, cm_ids = self._get_cm_deduction_for_invoice(
+                inv, report_month)
+            processed_cm_ids.update(cm_ids)
             net_billed = gross_billed
             if cm_deduction:
                 _logger.info(
@@ -832,16 +941,46 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                         exclusion_delta -= (line.debit or 0.0)
             return net_billed, exclusion_delta, cm_deduction
 
+        # old_ce_codes is shared across STEP 0-3 so CMs are always picked up by STEP 3
+        old_ce_codes = set()
+
+        # ------------------------------------------------------------------
+        # STEP 0: Process standalone invoices — posted out_invoices that have
+        #         x_studio_old_ce_1 but no matching SO anywhere.
+        #         Also seed old_ce_codes with their x_studio_old_ce_1 values so
+        #         STEP 3 can deduct matching credit memos in the same month.
+        # ------------------------------------------------------------------
+        if direct_invoice_ids:
+            for inv in self.env['account.move'].browse(list(direct_invoice_ids)):
+                if inv.state != 'posted' or inv.move_type != 'out_invoice':
+                    continue
+                if not (inv.invoice_date and month_start <= inv.invoice_date <= month_end):
+                    continue
+                if inv.id in processed_invoice_ids:
+                    continue
+                processed_invoice_ids.add(inv.id)
+                b_delta, e_delta, cm_delta = _apply_invoice(inv)
+                total_billed += b_delta
+                total_exclusion += e_delta
+                total_cm_deduction += cm_delta
+                inv_ce1 = getattr(inv, 'x_studio_old_ce_1', '') or ''
+                if inv_ce1:
+                    old_ce_codes.add(self._normalize_ce_code(inv_ce1))
+                _logger.info(
+                    'Included standalone invoice %s (old CE: %s) in billed with billed_delta %.2f',
+                    inv.name, inv_ce1, b_delta,
+                )
+
         # Browse sales orders
-        sales_orders = self.env['sale.order'].browse(list(sales_order_ids))
+        sales_orders = self.env['sale.order'].browse(list(sales_order_ids)) if sales_order_ids else self.env['sale.order']
 
         # ------------------------------------------------------------------
         # STEP 1: Process SO-linked invoices (out_invoice only)
         # ------------------------------------------------------------------
-        old_ce_codes = set()  # collect old CE codes for orphan lookup later
+        # old_ce_codes continues to be populated from SO x_studio_old_ce values
 
         for so in sales_orders:
-            # Collect the SO's old CE code for orphan invoice matching
+            # Collect the SO's old CE code so we can match unlinked invoices below
             so_old_ce = getattr(so, 'x_studio_old_ce_', None) or getattr(
                 so, 'x_studio_old_ce', '') or ''
             if so_old_ce:
@@ -863,15 +1002,13 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 total_cm_deduction += cm_delta
 
         # ------------------------------------------------------------------
-        # STEP 2: Find orphan invoices (not linked to ANY SO) whose
-        #         x_studio_old_ce_1 matches one of the SO old CE codes.
-        #         Only out_invoice — credit memos are handled via
-        #         reconciliation against the invoices above.
+        # STEP 2: Find invoices whose x_studio_old_ce_1 matches x_studio_old_ce
+        #         on any SO in this CE row.  No invoice-type or sale-link
+        #         restriction — CE code match is the sole criterion.
         # ------------------------------------------------------------------
-
+        _logger.info(sales_orders.mapped('name'))
         if old_ce_codes:
-
-            orphan_domain = [
+            ce_inv_domain = [
                 ('state', '=', 'posted'),
                 ('move_type', '=', 'out_invoice'),
                 ('invoice_date', '>=', month_start),
@@ -881,49 +1018,547 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             ]
 
             try:
-                candidate_moves = self.env['account.move'].sudo().search(
-                    orphan_domain)
+                ce_inv_candidates = self.env['account.move'].sudo().search(
+                    ce_inv_domain)
             except Exception:
-                candidate_moves = self.env['account.move']
+                ce_inv_candidates = self.env['account.move']
 
-            for inv in candidate_moves:
-                # Skip already processed (SO-linked) invoices
+            for inv in ce_inv_candidates:
                 if inv.id in processed_invoice_ids:
                     continue
-
-                # Must be CE Related
-                if getattr(inv, 'x_studio_invoice_type', '') != 'CE Related':
-                    continue
-
-                # Check if invoice's x_studio_old_ce_1 matches any SO old CE
                 inv_old_ce = getattr(inv, 'x_studio_old_ce_1', '') or ''
                 if not inv_old_ce:
                     continue
                 if self._normalize_ce_code(inv_old_ce) not in old_ce_codes:
                     continue
 
-                # Verify this invoice is truly orphan (not linked to ANY SO)
-                has_sale_link = any(
-                    aml.sale_line_ids for aml in inv.line_ids
-                )
-                if has_sale_link:
-                    continue
-
-                # Include this orphan invoice
                 processed_invoice_ids.add(inv.id)
                 b_delta, e_delta, cm_delta = _apply_invoice(inv)
                 total_billed += b_delta
                 total_exclusion += e_delta
                 total_cm_deduction += cm_delta
-                if inv.name:
-                    _logger.info(
-                        'Included orphan invoice %s (old CE: %s) in billed calculation '
-                        'with billed_delta %.2f and exclusion_delta %.2f. Total billed so far: %.2f',
-                        inv.name, inv.x_studio_old_ce_1,
-                        b_delta, e_delta, total_billed,
-                    )
+                _logger.info(
+                    'Included CE-matched invoice %s (old CE: %s) in billed '
+                    'with billed_delta %.2f. Total billed so far: %.2f',
+                    inv.name, inv_old_ce, b_delta, total_billed,
+                )
+
+        # ------------------------------------------------------------------
+        # STEP 3: Find credit memos whose x_studio_old_ce_1 matches
+        #         x_studio_old_ce on any SO in this CE row.
+        # ------------------------------------------------------------------
+        if old_ce_codes:
+            ce_cm_domain = [
+                ('state', '=', 'posted'),
+                ('move_type', '=', 'out_refund'),
+                ('invoice_date', '>=', month_start),
+                ('invoice_date', '<=', month_end),
+                ('company_id', 'in', self.env.companies.ids),
+                ('x_studio_old_ce_1', '!=', False),
+            ]
+            try:
+                ce_cm_candidates = self.env['account.move'].sudo().search(
+                    ce_cm_domain)
+            except Exception:
+                ce_cm_candidates = self.env['account.move']
+
+            # Loose variants of the CE codes we are looking for, used only as a
+            # last resort below.  Built once rather than per candidate.
+            old_ce_codes_loose = {
+                self._normalize_ce_code_loose(c) for c in old_ce_codes if c
+            }
+
+            for cm in ce_cm_candidates:
+                if cm.id in processed_cm_ids:
+                    continue
+                cm_old_ce = getattr(cm, 'x_studio_old_ce_1', '') or ''
+                if not cm_old_ce:
+                    continue
+
+                # Tier 1: strict match (whitespace stripped, uppercased).
+                if self._normalize_ce_code(cm_old_ce) not in old_ce_codes:
+                    # Tier 2 (last resort): separators stripped too.  Catches
+                    # 'PJB0178 1' vs 'PJB 0178-1', where a hyphen on one side
+                    # and a space on the other defeated the strict compare.
+                    if self._normalize_ce_code_loose(cm_old_ce) in old_ce_codes_loose:
+                        _logger.warning(
+                            'Credit memo %s (old CE %r) matched only after stripping '
+                            'separators -- the CE code formatting differs from the '
+                            'invoice/SO it belongs to. Deducting %.2f; consider '
+                            'correcting the CE code on the credit memo.',
+                            cm.name, cm_old_ce, cm.amount_untaxed or 0.0,
+                        )
+                    else:
+                        # Nothing matched.  Log it: an unmatched credit memo is
+                        # silently absent from BILLED, which is exactly how the
+                        # July 2026 P&G discrepancy went unnoticed.
+                        _logger.warning(
+                            'Credit memo %s (old CE %r, %.2f) matched no sale order '
+                            'or invoice in this CE row and was NOT deducted from '
+                            'BILLED. Check its Old CE# against the related invoice.',
+                            cm.name, cm_old_ce, cm.amount_untaxed or 0.0,
+                        )
+                        continue
+
+                cm_gross = self._get_amount_untaxed_in_company_currency(cm)
+                cm_exclusion = 0.0
+                if excluded_account_ids:
+                    for line in cm.line_ids:
+                        if line.account_id and line.account_id.id in excluded_account_ids:
+                            cm_exclusion += (line.credit or 0.0)
+                            cm_exclusion -= (line.debit or 0.0)
+
+                cm_amount = cm_gross - abs(cm_exclusion)
+                total_billed -= cm_amount
+                total_cm_deduction += cm_amount
+                processed_cm_ids.add(cm.id)
+                _logger.info(
+                    'Included CE-matched CM %s (old CE: %s): gross %.2f, excluded %.2f, net deduction %.2f',
+                    cm.name, cm_old_ce, cm_gross, cm_exclusion, cm_amount,
+                )
+
+        # Report back which documents actually made it into BILLED, so the
+        # reconciliation block on the Summary / customer sheets can diagnose the
+        # ones that did not.  Optional -- callers that pass nothing are unaffected.
+        if consumed_move_ids is not None:
+            consumed_move_ids.update(processed_invoice_ids)
+            consumed_move_ids.update(processed_cm_ids)
 
         return total_billed - total_exclusion, total_cm_deduction
+
+    # ------------------------------------------------------------------
+    # PnL billed helpers (Option 2)
+    # ------------------------------------------------------------------
+
+    def _resolve_pnl_ce_from_so_links(self, move):
+        """Return normalized CE code from the first SO found on move's invoice lines."""
+        try:
+            for aml in move.line_ids:
+                if not aml.sale_line_ids:
+                    continue
+                so = aml.sale_line_ids[0].order_id
+                if not so:
+                    continue
+                old_ce = getattr(so, 'x_studio_old_ce', '') or ''
+                if old_ce:
+                    return self._normalize_ce_code(old_ce)
+                if so.x_ce_code:
+                    return self._normalize_ce_code(so.x_ce_code)
+        except Exception as e:
+            _logger.debug('_resolve_pnl_ce_from_so_links error on %s: %s', getattr(move, 'name', '?'), e)
+        return None
+
+    def _resolve_pnl_ce_code(self, move, inv_ce_cache=None):
+        """Resolve normalized CE code for any posted move for PnL billed calculation.
+
+        Priority chain:
+        1. move.x_studio_old_ce_1 directly
+        2. CMs only: walk matched_debit_ids reconciliation → reconciled invoice →
+           invoice.x_studio_old_ce_1, then invoice SO links
+        3. SO links on the move itself (invoice or CM)
+        """
+        try:
+            # 1. Direct field
+            ce1 = getattr(move, 'x_studio_old_ce_1', '') or ''
+            if ce1 and ce1.strip():
+                return self._normalize_ce_code(ce1)
+
+            # 2. CMs: walk reconciliation
+            if move.move_type == 'out_refund':
+                receivable = move.line_ids.filtered(
+                    lambda l: l.account_id.account_type == 'asset_receivable'
+                )
+                for line in receivable:
+                    for partial in line.matched_debit_ids:
+                        try:
+                            inv = partial.debit_move_id.move_id
+                        except Exception:
+                            continue
+                        if not inv or inv.move_type != 'out_invoice':
+                            continue
+                        # Use pre-built cache when available
+                        if inv_ce_cache is not None and inv.id in inv_ce_cache:
+                            cached = inv_ce_cache[inv.id]
+                            if cached:
+                                return cached
+                        # Direct field on reconciled invoice
+                        inv_ce1 = getattr(inv, 'x_studio_old_ce_1', '') or ''
+                        if inv_ce1 and inv_ce1.strip():
+                            return self._normalize_ce_code(inv_ce1)
+                        # SO links on reconciled invoice
+                        ce = self._resolve_pnl_ce_from_so_links(inv)
+                        if ce:
+                            return ce
+
+            # 3. SO links on the move itself
+            return self._resolve_pnl_ce_from_so_links(move)
+
+        except Exception as e:
+            _logger.debug('_resolve_pnl_ce_code error on %s: %s', getattr(move, 'name', '?'), e)
+            return None
+
+    def _build_pnl_billed_map(self, report_month, partner_ids=None):
+        """Build {norm_ce_code: net_billed_float} for all posted invoices and CMs
+        in the report month.  Called once per report for PnL mode.
+
+        Invoices contribute positively; CMs negatively.
+        Excluded-account line amounts are stripped.
+        Two-pass approach: invoices are resolved first to seed a cache used
+        by CMs during their reconciliation walk.
+        """
+        month_start = report_month.replace(day=1)
+        month_end = (month_start + relativedelta(months=1)) - relativedelta(days=1)
+
+        domain = [
+            ('state', '=', 'posted'),
+            ('move_type', 'in', ['out_invoice', 'out_refund']),
+            ('invoice_date', '>=', month_start),
+            ('invoice_date', '<=', month_end),
+            ('company_id', 'in', self.env.companies.ids),
+        ]
+        if partner_ids:
+            domain.append(('partner_id', 'in', partner_ids))
+
+        try:
+            moves = self.env['account.move'].sudo().search(domain)
+        except Exception as e:
+            _logger.warning('_build_pnl_billed_map: search failed: %s', e)
+            return {}
+
+        if not moves:
+            return {}
+
+        excluded_account_ids = self._get_excluded_billed_account_ids()
+
+        # Pass 1 — resolve CE codes for all invoices and build cache
+        inv_ce_cache = {}  # {inv_id: norm_ce or None}
+        invoices = moves.filtered(lambda m: m.move_type == 'out_invoice')
+        for inv in invoices:
+            ce1 = getattr(inv, 'x_studio_old_ce_1', '') or ''
+            if ce1 and ce1.strip():
+                inv_ce_cache[inv.id] = self._normalize_ce_code(ce1)
+            else:
+                inv_ce_cache[inv.id] = self._resolve_pnl_ce_from_so_links(inv)
+
+        # Pass 2 — accumulate net billed per CE code
+        ce_billed_map = defaultdict(float)
+
+        for move in moves:
+            try:
+                norm_ce = self._resolve_pnl_ce_code(move, inv_ce_cache)
+            except Exception as e:
+                _logger.debug('PnL CE resolve error for %s: %s', getattr(move, 'name', '?'), e)
+                continue
+
+            if not norm_ce:
+                continue
+
+            try:
+                amount = self._get_amount_untaxed_in_company_currency(move)
+            except Exception:
+                amount = move.amount_untaxed or 0.0
+
+            exclusion = 0.0
+            if excluded_account_ids:
+                try:
+                    for line in move.line_ids:
+                        if line.account_id and line.account_id.id in excluded_account_ids:
+                            exclusion += (line.credit or 0.0)
+                            exclusion -= (line.debit or 0.0)
+                except Exception:
+                    pass
+
+            net = amount - abs(exclusion)
+            if move.move_type == 'out_invoice':
+                ce_billed_map[norm_ce] += net
+            else:
+                ce_billed_map[norm_ce] -= net
+
+        return dict(ce_billed_map)
+
+    def _get_pnl_billed_for_row(self, ce_code, ce_data, pnl_billed_map, consumed_ce_codes=None):
+        """Look up the PnL net billed for a CE row from the pre-built map.
+
+        Checks the row's CE code key plus all CE variants from its SOs and
+        direct invoices.  consumed_ce_codes (set) prevents double-counting when
+        the same norm CE appears in two rows (rare data-quality issue).
+        """
+        if not pnl_billed_map:
+            return 0.0
+
+        variants = set()
+        norm_key = self._normalize_ce_code(ce_code)
+        if norm_key:
+            variants.add(norm_key)
+
+        # Variants from SOs
+        so_ids = ce_data.get('sales_orders') or set()
+        if so_ids:
+            for so in self.env['sale.order'].browse(list(so_ids)):
+                try:
+                    if so.x_ce_code:
+                        variants.add(self._normalize_ce_code(so.x_ce_code))
+                    old_ce = getattr(so, 'x_studio_old_ce', '') or ''
+                    if old_ce:
+                        variants.add(self._normalize_ce_code(old_ce))
+                except Exception:
+                    pass
+
+        # Variants from direct (standalone) invoices
+        inv_ids = ce_data.get('direct_invoices') or set()
+        if inv_ids:
+            for inv in self.env['account.move'].browse(list(inv_ids)):
+                try:
+                    ce1 = getattr(inv, 'x_studio_old_ce_1', '') or ''
+                    if ce1:
+                        variants.add(self._normalize_ce_code(ce1))
+                except Exception:
+                    pass
+
+        total = 0.0
+        for v in variants:
+            if v not in pnl_billed_map:
+                continue
+            if consumed_ce_codes is not None and v in consumed_ce_codes:
+                continue
+            total += pnl_billed_map[v]
+            if consumed_ce_codes is not None:
+                consumed_ce_codes.add(v)
+
+        return total
+
+    # ------------------------------------------------------------------
+    # BILLED reconciliation (Summary + per-customer sheets)
+    # ------------------------------------------------------------------
+    #
+    # Finance reconciles this report by opening Accounting > Invoices, filtering
+    # Invoices-or-Credit-Notes / Posted / <report month> / Invoice Type =
+    # "CE Related", and reading the "Billed Amount (w/TP Cost)" total.  The
+    # helpers below reproduce exactly that control total at generation time,
+    # compare it with the BILLED the report produced, and name every document
+    # behind any difference -- so a discrepancy is explained in the workbook
+    # instead of being hunted invoice by invoice.
+    # ------------------------------------------------------------------
+
+    def _get_billed_control_moves(self, report_month, partner_ids=None):
+        """Posted customer documents that finance's Odoo filter would show.
+
+        Mirrors: Invoices or Credit Notes + Posted + invoice_date in the report
+        month + Invoice Type = 'CE Related'.
+
+        Returns:
+            account.move recordset
+        """
+        month_start = report_month.replace(day=1)
+        month_end = (month_start + relativedelta(months=1)) - relativedelta(days=1)
+        domain = [
+            ('state', '=', 'posted'),
+            ('move_type', 'in', ['out_invoice', 'out_refund']),
+            ('invoice_date', '>=', month_start),
+            ('invoice_date', '<=', month_end),
+            ('company_id', 'in', self.env.companies.ids),
+            ('x_studio_invoice_type', '=', 'CE Related'),
+        ]
+        if partner_ids:
+            domain.append(('partner_id', 'in', list(partner_ids)))
+        try:
+            return self.env['account.move'].sudo().search(domain)
+        except Exception as e:
+            _logger.warning('Reconciliation: control-set search failed: %s', e)
+            return self.env['account.move']
+
+    def _diagnose_unbilled_moves(self, moves, report_month):
+        """Explain, per document, why it never reached the BILLED column.
+
+        Args:
+            moves: account.move recordset (already known to be excluded)
+            report_month: date in the report month
+
+        Returns:
+            list of dicts: name, doc_type, partner, old_ce, amount, reason
+        """
+        month_start = report_month.replace(day=1)
+        month_end = (month_start + relativedelta(months=1)) - relativedelta(days=1)
+
+        # CE codes the report can currently attach a document to.
+        so_all = self.env['sale.order'].sudo().search(
+            [('x_studio_old_ce', '!=', False)])
+        inv_month = self.env['account.move'].sudo().search([
+            ('state', '=', 'posted'), ('move_type', '=', 'out_invoice'),
+            ('invoice_date', '>=', month_start), ('invoice_date', '<=', month_end),
+            ('x_studio_old_ce_1', '!=', False),
+        ])
+        known_strict, known_loose = set(), set()
+        for val in list(so_all.mapped('x_studio_old_ce')) + list(inv_month.mapped('x_studio_old_ce_1')):
+            if val:
+                known_strict.add(self._normalize_ce_code(val))
+                known_loose.add(self._normalize_ce_code_loose(val))
+
+        rows = []
+        for mv in moves:
+            old_ce = (getattr(mv, 'x_studio_old_ce_1', '') or '').strip()
+            has_so = bool(mv.line_ids.mapped('sale_line_ids'))
+            is_cm = mv.move_type == 'out_refund'
+
+            if not old_ce and not has_so:
+                reason = ('No Old CE# and no sale order link, so the report has no CE row '
+                          'to attach it to. Set the Old CE# on this document.')
+            elif not old_ce and has_so:
+                reason = ('Has a sale order but no Old CE#; its sale order produced no '
+                          'accrual or billing row this month.')
+            elif self._normalize_ce_code(old_ce) not in known_strict:
+                if self._normalize_ce_code_loose(old_ce) in known_loose:
+                    reason = (f"Old CE# '{old_ce}' is formatted differently from the sale "
+                              f"order/invoice it belongs to (spaces vs separators). "
+                              f"Align the CE code formatting.")
+                elif is_cm:
+                    reason = (f"Standalone credit note: no sale order and no invoice this "
+                              f"month carries Old CE# '{old_ce}', so no CE row exists for it.")
+                else:
+                    reason = (f"Old CE# '{old_ce}' matches no sale order and no other "
+                              f"invoice this month.")
+            else:
+                reason = ('Its CE code is known, but no CE row in this report claimed it '
+                          '(no accrual activity and no billed sale order this month).')
+
+            rows.append({
+                'name': mv.name or '',
+                'doc_type': 'Credit Note' if is_cm else 'Invoice',
+                'partner': mv.partner_id.name or '',
+                'old_ce': old_ce or '(none)',
+                'amount': mv.x_amount_untaxed_in_company_currency or 0.0,
+                'reason': reason,
+            })
+        rows.sort(key=lambda r: (-abs(r['amount']), r['name']))
+        return rows
+
+    def _write_reconciliation_block(self, workbook, sheet, start_row, report_month,
+                                    report_billed_total, consumed_move_ids,
+                                    partner_ids=None, billed_mode='standard',
+                                    show_customer=True):
+        """Render the BILLED reconciliation block. Returns the next free row.
+
+        Laid out below the sheet's TOTAL row with breathing space above it, so it
+        reads as a separate section rather than more data.
+        """
+        base = {'font_name': 'Calibri', 'font_size': 10}
+        f_banner = workbook.add_format({
+            **base, 'bold': True, 'font_size': 12, 'font_color': '#FFFFFF',
+            'bg_color': '#1F3864', 'align': 'left', 'valign': 'vcenter', 'border': 1})
+        f_label = workbook.add_format({**base, 'align': 'left', 'valign': 'vcenter'})
+        f_label_b = workbook.add_format({**base, 'bold': True, 'align': 'left', 'valign': 'vcenter'})
+        f_money = workbook.add_format({
+            **base, 'num_format': '#,##0.00;(#,##0.00);"-"', 'align': 'right', 'valign': 'vcenter'})
+        f_money_b = workbook.add_format({
+            **base, 'bold': True, 'num_format': '#,##0.00;(#,##0.00);"-"',
+            'align': 'right', 'valign': 'vcenter', 'top': 1})
+        f_diff_bad = workbook.add_format({
+            **base, 'bold': True, 'num_format': '#,##0.00;(#,##0.00);"-"',
+            'align': 'right', 'valign': 'vcenter', 'font_color': '#9C0006',
+            'bg_color': '#FFC7CE', 'border': 1})
+        f_diff_ok = workbook.add_format({
+            **base, 'bold': True, 'num_format': '#,##0.00;(#,##0.00);"-"',
+            'align': 'right', 'valign': 'vcenter', 'font_color': '#006100',
+            'bg_color': '#C6EFCE', 'border': 1})
+        f_hdr = workbook.add_format({
+            **base, 'bold': True, 'bg_color': '#D9E1F2', 'align': 'center',
+            'valign': 'vcenter', 'border': 1, 'text_wrap': True})
+        f_cell = workbook.add_format({**base, 'align': 'left', 'valign': 'top', 'border': 1})
+        f_cell_c = workbook.add_format({**base, 'align': 'center', 'valign': 'top', 'border': 1})
+        f_cell_m = workbook.add_format({
+            **base, 'num_format': '#,##0.00;(#,##0.00);"-"', 'align': 'right',
+            'valign': 'top', 'border': 1})
+        # No text_wrap: the reason column sits in a narrow numeric column that
+        # cannot be widened without distorting the data table above, so the text
+        # is left to overflow into the empty cells to its right, where it stays
+        # readable on one line.
+        f_reason = workbook.add_format({
+            **base, 'align': 'left', 'valign': 'vcenter'})
+        f_note_ok = workbook.add_format({**base, 'italic': True, 'font_color': '#006100'})
+        f_note_bad = workbook.add_format({**base, 'italic': True, 'font_color': '#9C0006'})
+
+        control_moves = self._get_billed_control_moves(report_month, partner_ids)
+        control_total = sum(
+            m.x_amount_untaxed_in_company_currency or 0.0 for m in control_moves)
+        difference = report_billed_total - control_total
+        month_label = report_month.strftime('%B %Y').upper()
+
+        row = start_row + 2  # breathing space under the TOTAL row
+
+        # ASCII only in every user-visible string here: these land in a workbook
+        # opened on Windows Excel, and a stray em-dash gains nothing.
+        sheet.merge_range(row, 0, row, 5,
+                          f'BILLED RECONCILIATION - {month_label}', f_banner)
+        sheet.set_row(row, 20)
+        row += 2
+
+        sheet.write(row, 0,
+                    'Odoo control total  (Invoices + Credit Notes / Posted / CE Related)',
+                    f_label)
+        sheet.write(row, 4, control_total, f_money)
+        row += 1
+        sheet.write(row, 0, 'This report - BILLED total', f_label)
+        sheet.write(row, 4, report_billed_total, f_money_b)
+        row += 1
+        sheet.write(row, 0, 'DIFFERENCE', f_label_b)
+        sheet.write(row, 4, difference,
+                    f_diff_ok if abs(difference) < 0.01 else f_diff_bad)
+        row += 2
+
+        if abs(difference) < 0.01:
+            sheet.write(row, 0,
+                        'No discrepancy - every posted CE Related document for this month is '
+                        'accounted for in the BILLED column.', f_note_ok)
+            return row + 1
+
+        if billed_mode != 'standard':
+            sheet.write(row, 0,
+                        'Document-level diagnosis is available in Standard billed mode only; '
+                        'this report was generated in PnL mode.', f_note_bad)
+            return row + 1
+
+        excluded = control_moves.filtered(lambda m: m.id not in (consumed_move_ids or set()))
+        details = self._diagnose_unbilled_moves(excluded, report_month)
+
+        sheet.write(row, 0, 'Documents not included in the BILLED column', f_label_b)
+        row += 1
+
+        headers = ['Document', 'Type', 'Customer', 'Old CE#', 'Amount', 'Why it is not included']
+        if not show_customer:
+            headers.pop(2)
+        for col, head in enumerate(headers):
+            sheet.write(row, col, head, f_hdr)
+        sheet.set_row(row, 28)
+        row += 1
+
+        listed = 0.0
+        for d in details:
+            col = 0
+            sheet.write(row, col, d['name'], f_cell_c); col += 1
+            sheet.write(row, col, d['doc_type'], f_cell_c); col += 1
+            if show_customer:
+                sheet.write(row, col, d['partner'], f_cell); col += 1
+            sheet.write(row, col, d['old_ce'], f_cell_c); col += 1
+            sheet.write(row, col, d['amount'], f_cell_m); col += 1
+            sheet.write(row, col, d['reason'], f_reason)
+            listed += d['amount']
+            row += 1
+
+        row += 1
+        # -listed because an excluded document's own sign is the opposite of the
+        # effect its absence has on the report total.
+        unexplained = difference - (-listed)
+        if abs(unexplained) < 0.01:
+            sheet.write(row, 0,
+                        f'The {len(details)} document(s) above fully account for the difference.',
+                        f_note_ok)
+        else:
+            sheet.write(row, 0,
+                        f'The {len(details)} document(s) above account for '
+                        f'{-listed:,.2f} of the {difference:,.2f} difference - '
+                        f'{unexplained:,.2f} is still unexplained and needs review.',
+                        f_note_bad)
+        return row + 1
 
     def generate_xlsx_report(self, workbook, data, docids):
         """
@@ -960,10 +1595,12 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Get all billed SO IDs from data
         all_billed_so_ids = data.get('all_billed_so_ids', []) if data else []
+        standalone_invoice_ids = data.get('standalone_invoice_ids', []) if data else []
+        billed_mode = data.get('billed_mode', 'standard') if data else 'standard'
 
         # Group lines by partner and CE (includes both accrued and billed)
         grouped_data = self._group_lines_by_ce(
-            move_lines, report_month, all_billed_so_ids)
+            move_lines, report_month, all_billed_so_ids, standalone_invoice_ids)
 
         # Merge reversal opening balance rows (for CEs only in OB, no journal entries)
         self._merge_reversal_opening_balance_rows(grouped_data)
@@ -978,21 +1615,32 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         reversal_ob_balances = self._calculate_reversal_opening_balances(
             report_month)
 
+        # For PnL mode: build the billed map once for the entire report
+        pnl_billed_map = {}
+        if billed_mode == 'pnl':
+            partner_ids = data.get('partner_ids') if data else None
+            pnl_billed_map = self._build_pnl_billed_map(report_month, partner_ids or None)
+
         # Generate summary sheet first
         self._generate_summary_sheet(
-            workbook, formats, grouped_data, report_month, reversal_ob_balances)
+            workbook, formats, grouped_data, report_month, reversal_ob_balances,
+            billed_mode=billed_mode, pnl_billed_map=pnl_billed_map)
 
         # Generate individual customer sheets
         for partner_name in sorted(grouped_data.keys()):
             self._generate_customer_sheet(
-                workbook, formats, partner_name, grouped_data[partner_name], report_month, reversal_ob_balances)
+                workbook, formats, partner_name, grouped_data[partner_name], report_month,
+                reversal_ob_balances, billed_mode=billed_mode, pnl_billed_map=pnl_billed_map)
 
         return True
 
-    def _generate_summary_sheet(self, workbook, formats, grouped_data, report_month, reversal_ob_balances=None):
+    def _generate_summary_sheet(self, workbook, formats, grouped_data, report_month,
+                                reversal_ob_balances=None, billed_mode='standard', pnl_billed_map=None):
         """Generate summary sheet with customer totals (no CE breakdown)"""
         if reversal_ob_balances is None:
             reversal_ob_balances = {}
+        if pnl_billed_map is None:
+            pnl_billed_map = {}
 
         sheet_name = 'SUMMARY'
         sheet = workbook.add_worksheet(sheet_name)
@@ -1006,14 +1654,13 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.set_column(1, 1, 40)   # DESCRIPTION
         sheet.set_column(2, 2, 8)    # Year
         sheet.set_column(3, 3, 12)   # Month
-        sheet.set_column(4, 4, 18)   # CM AMOUNT
-        sheet.set_column(5, 5, 18)   # BILLED
-        sheet.set_column(6, 6, 18)   # System Accrual
-        sheet.set_column(7, 7, 18)   # System Reversal
-        sheet.set_column(8, 8, 18)   # Manual Accrual
-        sheet.set_column(9, 9, 18)   # Manual Reversal
-        sheet.set_column(10, 10, 18)  # ADDL ADJ
-        sheet.set_column(11, 11, 15)  # Total
+        sheet.set_column(4, 4, 18)   # BILLED
+        sheet.set_column(5, 5, 18)   # System Accrual
+        sheet.set_column(6, 6, 18)   # System Reversal
+        sheet.set_column(7, 7, 18)   # Manual Accrual
+        sheet.set_column(8, 8, 18)   # Manual Reversal
+        sheet.set_column(9, 9, 18)   # ADDL ADJ
+        sheet.set_column(10, 10, 15)  # Total
 
         # Write report header
         row = 0
@@ -1027,7 +1674,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Write column headers
         headers = [
-            'CLIENT', 'DESCRIPTION', 'Year', 'Month', 'CM AMOUNT', 'BILLED',
+            'CLIENT', 'DESCRIPTION', 'Year', 'Month', 'BILLED',
             'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
             'ADDL ADJ', 'TOTAL'
         ]
@@ -1038,6 +1685,11 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.autofilter(row, 0, row, len(headers) - 1)
         row += 1
         data_start_row = row
+
+        # Accumulated while writing the rows below, then used by the BILLED
+        # reconciliation block appended under the TOTAL row.
+        recon_consumed_ids = set()
+        recon_billed_total = 0.0
 
         # Write summary data rows (aggregate by customer)
         for partner_name in sorted(grouped_data.keys()):
@@ -1052,11 +1704,12 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 'addl_adj': 0
             }
 
-            # Collect all descriptions, years, months, and sales orders
+            # Collect all descriptions, years, months, sales orders and direct invoices
             descriptions = set()
             years = set()
             months = set()
             all_sales_orders = set()
+            all_direct_invoices = set()
 
             for ce_code, ce_data in ces_data.items():
                 amounts = self._calculate_amounts_by_type(
@@ -1098,12 +1751,22 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 if ce_data['month']:
                     months.add(ce_data['month'])
 
-                # Collect all sales orders for this customer
+                # Collect all sales orders and direct invoices for this customer
                 all_sales_orders.update(ce_data['sales_orders'])
+                all_direct_invoices.update(ce_data.get('direct_invoices', set()))
 
             # Calculate billed amount for all sales orders of this customer
-            billed_amount, cm_amount = self._calculate_billed_amount(
-                all_sales_orders, report_month)
+            if billed_mode == 'pnl':
+                consumed = set()
+                billed_amount = sum(
+                    self._get_pnl_billed_for_row(ce_code, ces_data[ce_code], pnl_billed_map, consumed)
+                    for ce_code in ces_data
+                )
+            else:
+                billed_amount, _ = self._calculate_billed_amount(
+                    all_sales_orders, report_month, all_direct_invoices,
+                    consumed_move_ids=recon_consumed_ids)
+            recon_billed_total += billed_amount
 
             # Write customer row
             sheet.write(row, 0, partner_name, formats['normal'])
@@ -1120,27 +1783,24 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             month_str = report_month.strftime('%B').upper()
             sheet.write(row, 3, month_str, formats['centered'])
 
-            # Write CM AMOUNT (informational, not included in TOTAL)
-            sheet.write(row, 4, -cm_amount if cm_amount else 0, formats['currency_negative'])
-
             # Write BILLED amount (net, after CM deduction)
-            sheet.write(row, 5, billed_amount, formats['currency_negative'])
+            sheet.write(row, 4, billed_amount, formats['currency_negative'])
 
             sheet.write(
-                row, 6, total_amounts['system_accrual'], formats['currency_negative'])
+                row, 5, total_amounts['system_accrual'], formats['currency_negative'])
             sheet.write(
-                row, 7, total_amounts['system_reversal'], formats['currency_negative'])
+                row, 6, total_amounts['system_reversal'], formats['currency_negative'])
             sheet.write(
-                row, 8, total_amounts['manual_accrual'], formats['currency_negative'])
+                row, 7, total_amounts['manual_accrual'], formats['currency_negative'])
             sheet.write(
-                row, 9, total_amounts['manual_reversal'], formats['currency_negative'])
+                row, 8, total_amounts['manual_reversal'], formats['currency_negative'])
             sheet.write(
-                row, 10, total_amounts['addl_adj'], formats['currency_negative'])
+                row, 9, total_amounts['addl_adj'], formats['currency_negative'])
 
-            # Total formula (F+G+H+I+J+K = BILLED+accruals/reversals+ADDL ADJ, excludes CM AMOUNT)
+            # Total formula (E+F+G+H+I+J = BILLED+accruals/reversals+ADDL ADJ)
             excel_row = row + 1
             sheet.write_formula(
-                row, 11, f'=F{excel_row}+G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}', formats['currency'])
+                row, 10, f'=E{excel_row}+F{excel_row}+G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}', formats['currency'])
 
             row += 1
 
@@ -1181,7 +1841,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # TOTAL label
         sheet.write(total_row, 3, 'TOTAL', bold_with_border)
 
-        # Sum formulas for monetary columns (E=CM AMOUNT, F=BILLED, G-K=accruals/reversals/adj, L=TOTAL)
+        # Sum formulas for monetary columns (E=BILLED, F-J=accruals/reversals/adj, K=TOTAL)
         sheet.write_formula(
             total_row, 4, f'=SUM(E{data_start_row + 1}:E{total_row})', currency_negative_bold_format)
         sheet.write_formula(
@@ -1195,16 +1855,27 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.write_formula(
             total_row, 9, f'=SUM(J{data_start_row + 1}:J{total_row})', currency_negative_bold_format)
         sheet.write_formula(
-            total_row, 10, f'=SUM(K{data_start_row + 1}:K{total_row})', currency_negative_bold_format)
-        sheet.write_formula(
-            total_row, 11, f'=SUM(L{data_start_row + 1}:L{total_row})', currency_bold_format)
+            total_row, 10, f'=SUM(K{data_start_row + 1}:K{total_row})', currency_bold_format)
+
+        # BILLED reconciliation for every customer in this report.
+        self._write_reconciliation_block(
+            workbook, sheet, total_row, report_month,
+            report_billed_total=recon_billed_total,
+            consumed_move_ids=recon_consumed_ids,
+            partner_ids=None,
+            billed_mode=billed_mode,
+            show_customer=True,
+        )
 
         return True
 
-    def _generate_customer_sheet(self, workbook, formats, partner_name, ces_data, report_month, reversal_ob_balances=None):
+    def _generate_customer_sheet(self, workbook, formats, partner_name, ces_data, report_month,
+                                 reversal_ob_balances=None, billed_mode='standard', pnl_billed_map=None):
         """Generate individual customer sheet with CE breakdown"""
         if reversal_ob_balances is None:
             reversal_ob_balances = {}
+        if pnl_billed_map is None:
+            pnl_billed_map = {}
 
         # Sanitize sheet name
         sheet_name = self._sanitize_sheet_name(partner_name)
@@ -1222,20 +1893,19 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.set_column(3, 3, 40)   # DESCRIPTION
         sheet.set_column(4, 4, 8)    # Year
         sheet.set_column(5, 5, 12)   # Month
-        sheet.set_column(6, 6, 18)   # CM AMOUNT
-        sheet.set_column(7, 7, 18)   # BILLED
-        sheet.set_column(8, 8, 18)   # System Accrual
-        sheet.set_column(9, 9, 18)   # System Reversal
-        sheet.set_column(10, 10, 18)  # Manual Accrual
-        sheet.set_column(11, 11, 18)  # Manual Reversal
-        sheet.set_column(12, 12, 18)  # ADDL ADJ
-        sheet.set_column(13, 13, 15)  # Total
-        sheet.set_column(14, 14, 20)  # CE Status
-        sheet.set_column(15, 15, 15)  # Per CSD
-        sheet.set_column(16, 16, 15)  # Variance
-        sheet.set_column(17, 17, 20)  # Cost to Client
-        sheet.set_column(18, 18, 20)  # For Revenue Adjustment
-        sheet.set_column(19, 19, 30)  # Remarks
+        sheet.set_column(6, 6, 18)   # BILLED
+        sheet.set_column(7, 7, 18)   # System Accrual
+        sheet.set_column(8, 8, 18)   # System Reversal
+        sheet.set_column(9, 9, 18)  # Manual Accrual
+        sheet.set_column(10, 10, 18)  # Manual Reversal
+        sheet.set_column(11, 11, 18)  # ADDL ADJ
+        sheet.set_column(12, 12, 15)  # Total
+        sheet.set_column(13, 13, 20)  # CE Status
+        sheet.set_column(14, 14, 15)  # Per CSD
+        sheet.set_column(15, 15, 15)  # Variance
+        sheet.set_column(16, 16, 20)  # Cost to Client
+        sheet.set_column(17, 17, 20)  # For Revenue Adjustment
+        sheet.set_column(18, 18, 30)  # Remarks
 
         # Write report header
         row = 0
@@ -1250,7 +1920,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
 
         # Write column headers
         headers = [
-            'CE#', 'SO REFERENCE', 'CE DATE', 'DESCRIPTION', 'Year', 'Month', 'CM AMOUNT',
+            'CE#', 'SO REFERENCE', 'CE DATE', 'DESCRIPTION', 'Year', 'Month',
             'BILLED', 'SYSTEM ACCRUAL', 'SYSTEM REVERSAL', 'MANUAL ACCRUAL', 'MANUAL REVERSAL',
             'ADDL ADJ', 'TOTAL', 'CE STATUS', 'PER CSD', 'VARIANCE',
             f'COST TO CLIENT - {cost_to_client_month}', 'FOR REVENUE ADJUSTMENT', 'REMARKS'
@@ -1263,15 +1933,25 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         row += 1
         data_start_row = row
 
+        # Accumulated while writing the rows below, then used by the BILLED
+        # reconciliation block appended under this sheet's TOTAL row.
+        recon_consumed_ids = set()
+        recon_billed_total = 0.0
+
         # Write data rows
         for ce_code in sorted(ces_data.keys()):
             ce_data = ces_data[ce_code]
             amounts = self._calculate_amounts_by_type(
                 ce_data['lines'], report_month)
 
-            # Calculate billed amount and CM deduction for this CE's sales orders
-            billed_amount, cm_amount = self._calculate_billed_amount(
-                ce_data['sales_orders'], report_month)
+            # Calculate billed amount for this CE row
+            if billed_mode == 'pnl':
+                billed_amount = self._get_pnl_billed_for_row(ce_code, ce_data, pnl_billed_map)
+            else:
+                billed_amount, _ = self._calculate_billed_amount(
+                    ce_data['sales_orders'], report_month, ce_data.get('direct_invoices', set()),
+                    consumed_move_ids=recon_consumed_ids)
+            recon_billed_total += billed_amount
 
             sheet.write(row, 0, ce_code, formats['centered'])
 
@@ -1295,11 +1975,8 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
             else:
                 sheet.write(row, 5, '', formats['centered'])
 
-            # Write CM AMOUNT (col G, index 6) - informational, not in TOTAL
-            sheet.write(row, 6, -cm_amount if cm_amount else 0, formats['currency_negative'])
-
-            # Write BILLED amount (col H, index 7) - net, after CM deduction
-            sheet.write(row, 7, billed_amount, formats['currency_negative'])
+            # Write BILLED amount (col G, index 6) - net, after CM deduction
+            sheet.write(row, 6, billed_amount, formats['currency_negative'])
 
             # Apply reversal OB fallback for this CE.
             # Try the CE code first, then fall back to x_studio_old_ce
@@ -1324,40 +2001,40 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
                 manual_reversal_val = rev_ob['manual_reversal']
             manual_reversal_val -= rev_ob.get('manual_reversal_adjustment', 0)
 
-            sheet.write(row, 8, amounts['system_accrual'],
+            sheet.write(row, 7, amounts['system_accrual'],
                         formats['currency_negative'])
-            sheet.write(row, 9, system_reversal_val,
+            sheet.write(row, 8, system_reversal_val,
                         formats['currency_negative'])
-            sheet.write(row, 10, amounts['manual_accrual'],
+            sheet.write(row, 9, amounts['manual_accrual'],
                         formats['currency_negative'])
-            sheet.write(row, 11, manual_reversal_val,
+            sheet.write(row, 10, manual_reversal_val,
                         formats['currency_negative'])
-            sheet.write(row, 12, amounts['addl_adj'],
+            sheet.write(row, 11, amounts['addl_adj'],
                         formats['currency_negative'])
 
-            # Total formula (H+I+J+K+L+M = BILLED+accruals/reversals+ADDL ADJ, excludes CM AMOUNT)
+            # Total formula (G+H+I+J+K+L = BILLED+accruals/reversals+ADDL ADJ)
             excel_row = row + 1
             sheet.write_formula(
-                row, 13, f'=H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}+L{excel_row}+M{excel_row}', formats['currency'])
+                row, 12, f'=G{excel_row}+H{excel_row}+I{excel_row}+J{excel_row}+K{excel_row}+L{excel_row}', formats['currency'])
 
-            sheet.write(row, 14, ce_data['ce_status'], formats['centered'])
+            sheet.write(row, 13, ce_data['ce_status'], formats['centered'])
 
             # PER CSD - empty for user input
-            sheet.write(row, 15, '', formats['currency'])
+            sheet.write(row, 14, '', formats['currency'])
 
-            # VARIANCE formula: Total - Per CSD (N - P)
+            # VARIANCE formula: Total - Per CSD (M - O)
             sheet.write_formula(
-                row, 16, f'=N{excel_row}-P{excel_row}', formats['currency'])
+                row, 15, f'=M{excel_row}-O{excel_row}', formats['currency'])
 
             # COST TO CLIENT - empty for user input
-            sheet.write(row, 17, '', formats['currency'])
+            sheet.write(row, 16, '', formats['currency'])
 
-            # FOR REVENUE ADJUSTMENT formula: Variance - Cost to Client (Q - R)
+            # FOR REVENUE ADJUSTMENT formula: Variance - Cost to Client (P - Q)
             sheet.write_formula(
-                row, 18, f'=Q{excel_row}-R{excel_row}', formats['currency'])
+                row, 17, f'=P{excel_row}-Q{excel_row}', formats['currency'])
 
             # REMARKS - empty for user input
-            sheet.write(row, 19, '', formats['normal'])
+            sheet.write(row, 18, '', formats['normal'])
 
             row += 1
 
@@ -1398,7 +2075,7 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         # TOTAL label
         sheet.write(total_row, 5, 'TOTAL', bold_with_border)
 
-        # Sum formulas for monetary columns (G=CM AMOUNT, H=BILLED, I-M=accruals/reversals/adj, N=TOTAL)
+        # Sum formulas for monetary columns (G=BILLED, H-M=accruals/reversals/adj, M=TOTAL)
         sheet.write_formula(
             total_row, 6, f'=SUM(G{data_start_row + 1}:G{total_row})', currency_negative_bold_format)
         sheet.write_formula(
@@ -1412,30 +2089,53 @@ class SalesOrderRevenueXLSX(models.AbstractModel):
         sheet.write_formula(
             total_row, 11, f'=SUM(L{data_start_row + 1}:L{total_row})', currency_negative_bold_format)
         sheet.write_formula(
-            total_row, 12, f'=SUM(M{data_start_row + 1}:M{total_row})', currency_negative_bold_format)
-        sheet.write_formula(
-            total_row, 13, f'=SUM(N{data_start_row + 1}:N{total_row})', currency_bold_format)
+            total_row, 12, f'=SUM(M{data_start_row + 1}:M{total_row})', currency_bold_format)
 
         # Empty CE Status cell
-        sheet.write(total_row, 14, '', formats['section_header_no_border'])
+        sheet.write(total_row, 13, '', formats['section_header_no_border'])
 
         # Sum for PER CSD
         sheet.write_formula(
-            total_row, 15, f'=SUM(P{data_start_row + 1}:P{total_row})', currency_bold_format)
+            total_row, 14, f'=SUM(O{data_start_row + 1}:O{total_row})', currency_bold_format)
 
         # Sum for VARIANCE
         sheet.write_formula(
-            total_row, 16, f'=SUM(Q{data_start_row + 1}:Q{total_row})', currency_bold_format)
+            total_row, 15, f'=SUM(P{data_start_row + 1}:P{total_row})', currency_bold_format)
 
         # Sum for COST TO CLIENT
         sheet.write_formula(
-            total_row, 17, f'=SUM(R{data_start_row + 1}:R{total_row})', currency_bold_format)
+            total_row, 16, f'=SUM(Q{data_start_row + 1}:Q{total_row})', currency_bold_format)
 
         # Sum for FOR REVENUE ADJUSTMENT
         sheet.write_formula(
-            total_row, 18, f'=SUM(S{data_start_row + 1}:S{total_row})', currency_bold_format)
+            total_row, 17, f'=SUM(R{data_start_row + 1}:R{total_row})', currency_bold_format)
 
         # Empty REMARKS cell
-        sheet.write(total_row, 19, '', formats['section_header_no_border'])
+        sheet.write(total_row, 18, '', formats['section_header_no_border'])
+
+        # Resolve this sheet's customer to real partner ids so the reconciliation
+        # control set is scoped to them.  Taken from the underlying records rather
+        # than matching on the display name, which is uppercased and not unique.
+        recon_partner_ids = set()
+        for ce_data in ces_data.values():
+            for line in ce_data.get('lines', []):
+                if line.partner_id:
+                    recon_partner_ids.add(line.partner_id.id)
+            for so in self.env['sale.order'].sudo().browse(list(ce_data.get('sales_orders') or [])):
+                if so.partner_id:
+                    recon_partner_ids.add(so.partner_id.id)
+            for inv in self.env['account.move'].sudo().browse(list(ce_data.get('direct_invoices') or [])):
+                if inv.partner_id:
+                    recon_partner_ids.add(inv.partner_id.id)
+
+        # BILLED reconciliation for this customer only.
+        self._write_reconciliation_block(
+            workbook, sheet, total_row, report_month,
+            report_billed_total=recon_billed_total,
+            consumed_move_ids=recon_consumed_ids,
+            partner_ids=recon_partner_ids or None,
+            billed_mode=billed_mode,
+            show_customer=False,
+        )
 
         return True

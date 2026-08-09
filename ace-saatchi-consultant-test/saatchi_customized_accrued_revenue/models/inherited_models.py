@@ -548,6 +548,17 @@ class SaleOrder(models.Model):
         total_eligible_for_accrue = 0
         lines_created = 0
 
+        # ── Performance (2026-08-09) ────────────────────────────────────────
+        # Line values are collected here and written in ONE create() after the
+        # loop.  Two per-call caches avoid re-running searches that can only
+        # ever return the same answer within a single call.  See the comments
+        # at each use site, and the create() call at the end of this method.
+        # Behaviour is unchanged: same lines, same values, same totals.
+        # ────────────────────────────────────────────────────────────────────
+        line_vals_list = []
+        agencies_distribution = None   # None = not looked up yet; {} = none found
+        income_account_cache = {}      # {template_account_id: account record}
+
         _logger.info(f"Starting accrual creation for SO {self.name}")
 
         # Get the target company from accrued_revenue
@@ -610,20 +621,27 @@ class SaleOrder(models.Model):
             if not analytic_distribution and hasattr(self, 'analytic_distribution') and self.analytic_distribution:
                 analytic_distribution = self.analytic_distribution
 
-            # Default to "AGENCIES" analytic account for target company if still no distribution found
+            # Default to "AGENCIES" analytic account for target company if still no distribution found.
+            # The lookup depends only on target_company, which is constant for the
+            # whole call, so it is resolved once and reused.  It previously ran one
+            # search() per order line.  A copy is handed out each time so a caller
+            # mutating one line's distribution cannot affect the others.
             if not analytic_distribution:
-                agencies_account = self.env['account.analytic.account'].sudo().search([
-                    ('name', '=', 'AGENCIES'),
-                    ('company_id', '=', target_company.id)
-                ], limit=1)
-                if agencies_account:
-                    analytic_distribution = {agencies_account.id: 100}
-                    _logger.debug(
-                        f"Using default AGENCIES analytic account (ID: {agencies_account.id}) for line {line.name}")
-                else:
-                    _logger.warning(
-                        f"No AGENCIES analytic account found for company {target_company.name}. Skipping analytic distribution for line {line.name}")
-                    analytic_distribution = {}
+                if agencies_distribution is None:
+                    agencies_account = self.env['account.analytic.account'].sudo().search([
+                        ('name', '=', 'AGENCIES'),
+                        ('company_id', '=', target_company.id)
+                    ], limit=1)
+                    if agencies_account:
+                        agencies_distribution = {agencies_account.id: 100}
+                        _logger.debug(
+                            f"Using default AGENCIES analytic account (ID: {agencies_account.id}) for SO {self.name}")
+                    else:
+                        agencies_distribution = {}
+                        _logger.warning(
+                            f"No AGENCIES analytic account found for company {target_company.name}. "
+                            f"Skipping analytic distribution for SO {self.name}")
+                analytic_distribution = dict(agencies_distribution)
 
             # Get income account from product
             template_income_account = line.product_id.property_account_income_id or \
@@ -634,65 +652,59 @@ class SaleOrder(models.Model):
                     f"No income account found for line {line.name} in SO {self.name}")
                 continue
 
-            # Find the equivalent account in the target company
-            if target_company in template_income_account.company_ids:
-                # Account is valid for target company
+            # Resolve the equivalent account in the target company.
+            # Cached per template account: order lines routinely repeat the same
+            # product (and therefore the same income account), and this used to
+            # re-run the search for every one of them.
+            if template_income_account.id in income_account_cache:
+                income_account = income_account_cache[template_income_account.id]
+            elif target_company in template_income_account.company_ids:
+                # Account is already valid for the target company
                 income_account = template_income_account
+                income_account_cache[template_income_account.id] = income_account
             else:
-                # Find equivalent account in target company by code or name
+                # Find the equivalent account in the target company by name.
+                # NOTE: a second "fallback: try by name" search used to sit here,
+                # byte-for-byte identical to this one (same domain, same limit), so
+                # it could never return anything this search had not already found.
+                # It was removed -- this is the only lookup that ever did anything.
                 income_account = self.env['account.account'].sudo().search([
                     ('name', '=', template_income_account.name),
                     ('company_ids', 'in', target_company.id),
                     ('deprecated', '=', False)
                 ], limit=1)
+                income_account_cache[template_income_account.id] = income_account
 
-                if not income_account:
-                    # Fallback: try by name
-                    income_account = self.env['account.account'].sudo().search([
-                        ('name', '=', template_income_account.name),
-                        ('company_ids', 'in', target_company.id),
-                        ('deprecated', '=', False)
-                    ], limit=1)
+            if not income_account:
+                _logger.warning(
+                    f"No equivalent income account found for line {line.name} in company {target_company.name}. "
+                    f"Template account: {template_income_account.code} - {template_income_account.name}"
+                )
+                continue
 
-                if not income_account:
-                    _logger.warning(
-                        f"No equivalent income account found for line {line.name} in company {target_company.name}. "
-                        f"Template account: {template_income_account.code} - {template_income_account.name}"
-                    )
-                    continue
-
-            # Handle negative amounts (returns/adjustments)
+            # Handle negative amounts (returns/adjustments).
+            # Values are collected here and created in one batch after the loop.
+            effective_ce = self.x_studio_old_ce or self.x_ce_code
+            line_vals = {
+                'accrued_revenue_id': accrued_revenue.id,
+                'ce_line_id': line.id,
+                'account_id': income_account.id,
+                'label': f'{effective_ce} - {line.name}',
+                'currency_id': line_currency.id,
+                'analytic_distribution': analytic_distribution,
+            }
             if accrued_amount < 0:
                 # Negative accrual: Dr. Revenue (reverse the credit)
-                effective_ce = self.x_studio_old_ce or self.x_ce_code
-                self.env['saatchi.accrued_revenue_lines'].create({
-                    'accrued_revenue_id': accrued_revenue.id,
-                    'ce_line_id': line.id,
-                    'account_id': income_account.id,
-                    'label': f'{effective_ce} - {line.name}',
-                    'debit': abs(accrued_amount),  # Debit the revenue account
-                    'credit': 0.0,
-                    'currency_id': line_currency.id,
-                    'analytic_distribution': analytic_distribution,
-                })
+                line_vals.update({'debit': abs(accrued_amount), 'credit': 0.0})
             else:
                 # Positive accrual: Cr. Revenue (normal)
-                effective_ce = self.x_studio_old_ce or self.x_ce_code
-                self.env['saatchi.accrued_revenue_lines'].create({
-                    'accrued_revenue_id': accrued_revenue.id,
-                    'ce_line_id': line.id,
-                    'account_id': income_account.id,
-                    'label': f'{effective_ce} - {line.name}',
-                    'credit': accrued_amount,
-                    'debit': 0.0,
-                    'currency_id': line_currency.id,
-                    'analytic_distribution': analytic_distribution,
-                })
+                line_vals.update({'credit': accrued_amount, 'debit': 0.0})
+            line_vals_list.append(line_vals)
 
             total_eligible_for_accrue += accrued_amount  # Keep the sign
             lines_created += 1
             _logger.debug(
-                f"Created line for {line.name}, amount: {accrued_amount}")
+                f"Prepared line for {line.name}, amount: {accrued_amount}")
 
         if lines_created == 0:
             accrued_revenue.unlink()
@@ -700,15 +712,35 @@ class SaleOrder(models.Model):
                 f"No eligible lines found for accrual in SO {self.name}")
             return False
 
-        # Create Total Accrued line (will be computed by update_total_accrued_line)
-        self.env['saatchi.accrued_revenue_lines'].create({
+        # Total Accrued line -- balanced by update_total_accrued_line().
+        #
+        # sequence=999 is REQUIRED here and must not be dropped.  The model is
+        # ordered '_order = sequence desc', so 999 keeps Total Accrued at the top
+        # of the line list.  Before batching, this line was created without a
+        # sequence (defaulting to 10), but update_total_accrued_line() had already
+        # created its own Total Accrued line with sequence=999 on the first
+        # per-line create(); the next recompute then deleted the surplus line and
+        # kept the 999 one.  Batching removes that accidental duplicate, so the
+        # sequence now has to be set explicitly to preserve the same end state.
+        line_vals_list.append({
             'accrued_revenue_id': accrued_revenue.id,
             'label': 'Total Accrued',
             'currency_id': accrued_revenue.currency_id.id,
             'account_id': accrued_revenue.accrual_account_id.id,
             'debit': 0.0,
             'credit': 0.0,
+            'sequence': 999,
         })
+
+        # ── Single batched create (2026-08-09) ──────────────────────────────
+        # saatchi.accrued_revenue_lines.create() is an @api.model_create_multi
+        # override that calls update_total_accrued_line() ONCE PER DISTINCT
+        # accrued_revenue_id in the batch.  Creating the lines one at a time
+        # therefore triggered a full Total-Accrued recompute *and* write for
+        # every single line; one create() call triggers exactly one, with an
+        # identical end state.  Do not split this back into per-line creates.
+        # ────────────────────────────────────────────────────────────────────
+        self.env['saatchi.accrued_revenue_lines'].create(line_vals_list)
 
         # Store original total (already converted if should_convert was True)
         accrued_revenue.write(

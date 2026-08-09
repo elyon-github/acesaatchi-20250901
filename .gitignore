@@ -1,2 +1,79 @@
+# ---------------------------------------------------------------------------
+# Odoo 18 custom addons — Client-Trial
+# ---------------------------------------------------------------------------
+
+# Python bytecode
 *.pyc
+*.pyo
+*.pyd
 __pycache__/
+*.egg-info/
+.eggs/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Odoo runtime artefacts
+*.log
+odoo.log*
+filestore/
+sessions/
+.odoo_history
+*.pid
+
+# Local / machine-specific config — never commit credentials
+odoo.conf
+*.conf.local
+.env
+.env.*
+!.env.example
+
+# Databases and dumps
+*.sql
+*.dump
+*.zip
+*.gz
+*.bak
+*.backup
+
+# Generated documentation / knowledge graph
+graphify-out/
+_build/
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+*.rej
+
+# OS cruft
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Node (only if a module ever builds assets locally)
+node_modules/
+npm-debug.log*
+
+# Ad-hoc scratch files — keep these out of the client repo
+untitled.txt
+*.tmp
+*.temp
+scratch_*
+debug_*.py
+analyze_*.py
+test_scratch*
+
+# ---------------------------------------------------------------------------
+# NOT ignored on purpose
+# ---------------------------------------------------------------------------
+# app_common/ and app_odoo_customize/ are third-party odoo.com vendor modules.
+# They are NOT installed in our database and must never be read or edited, but
+# they stay tracked because deployments may still expect them on disk.
+# See ../../../ai-context/02-architecture.md

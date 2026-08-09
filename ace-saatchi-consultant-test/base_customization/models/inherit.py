@@ -540,6 +540,27 @@ class InheritPurchaseOrderLine(models.Model):
             elif line_currency == self.fx_currency_id:
                 self.price_unit = self.fx_price_unit
 
+    @api.depends('invoice_lines.move_id.state', 'invoice_lines.quantity', 'qty_received', 'product_uom_qty', 'order_id.state')
+    def _compute_qty_invoiced(self):
+        for line in self:
+            # compute qty_invoiced
+            qty = 0.0
+            for inv_line in line._get_invoice_lines():
+                if inv_line.move_id.state not in ['cancel'] or inv_line.move_id.payment_state == 'invoicing_legacy':
+                    if inv_line.move_id.move_type == 'in_invoice':
+                        qty += inv_line.product_uom_id._compute_quantity(inv_line.quantity, line.product_uom, round=False)
+                    elif inv_line.move_id.move_type == 'in_refund':
+                        qty -= inv_line.product_uom_id._compute_quantity(inv_line.quantity, line.product_uom)
+            line.qty_invoiced = qty
+
+            # compute qty_to_invoice
+            if line.order_id.state in ['purchase', 'done']:
+                if line.product_id.purchase_method == 'purchase':
+                    line.qty_to_invoice = line.product_qty - line.qty_invoiced
+                else:
+                    line.qty_to_invoice = line.qty_received - line.qty_invoiced
+            else:
+                line.qty_to_invoice = 0
 
 class AccountMove(models.Model):
     _inherit = 'account.move'
@@ -782,23 +803,28 @@ class AccountMove(models.Model):
                     )
             record.x_alt_currency_amount = total
 
-    @api.depends('amount_untaxed', 'line_ids.credit', 'currency_id', 'company_id.currency_id', 'date', 'state')
+    @api.depends('amount_untaxed', 'line_ids.credit', 'currency_id', 'company_id.currency_id', 'date', 'state', 'move_type')
     def _compute_amount_untaxed_in_company_currency(self):
         """
         Compute tax excluded amount always in company currency (PHP).
         - If invoice currency == company currency (PHP): use amount_untaxed as-is
         - If invoice currency != company currency (USD, etc.): sum journal items' credit (already in PHP)
+        For credit memos/refunds, enforce negative sign.
         """
         for record in self:
             if record.currency_id == record.company_id.currency_id:
-                # Invoice is already in PHP
-                record.x_amount_untaxed_in_company_currency = record.amount_untaxed
+                value = record.amount_untaxed
             else:
                 # Foreign currency invoice - sum journal items' credit (already in PHP)
                 total = 0.0
                 for line in record.line_ids:
                     total += line.credit
-                record.x_amount_untaxed_in_company_currency = total
+                value = total
+
+            if record.move_type in ['out_refund', 'in_refund']:
+                record.x_amount_untaxed_in_company_currency = -abs(value)
+            else:
+                record.x_amount_untaxed_in_company_currency = value
 
     def _get_excluded_billed_account_ids(self):
         """Get the set of account IDs to exclude from billed amount calculation.
@@ -819,7 +845,7 @@ class AccountMove(models.Model):
             pass
         return set()
 
-    @api.depends('line_ids.account_id', 'line_ids.credit', 'line_ids.debit', 'state')
+    @api.depends('line_ids.account_id', 'line_ids.credit', 'line_ids.debit', 'state', 'move_type')
     def _compute_excluded_billed_amount(self):
         """
         Compute the total amount from journal items posted to excluded billed accounts.
@@ -827,8 +853,7 @@ class AccountMove(models.Model):
         For each journal item line in an excluded account:
           Total = sum of (credit - debit) for all lines in excluded accounts
         
-        This matches the logic used in the adjustment report for identifying
-        excluded billed amounts.
+        For credit memos/refunds, enforce negative sign so it mirrors the move sign.
         """
         for record in self:
             excluded_account_ids = record._get_excluded_billed_account_ids()
@@ -840,21 +865,26 @@ class AccountMove(models.Model):
             total_exclusion = 0.0
             for line in record.line_ids:
                 if line.account_id and line.account_id.id in excluded_account_ids:
-                    # Sum credit - debit for excluded accounts
                     total_exclusion += (line.credit or 0.0) - (line.debit or 0.0)
-            
-            record.x_excluded_billed_amount = total_exclusion
 
-    @api.depends('x_amount_untaxed_in_company_currency', 'x_excluded_billed_amount')
+            if record.move_type in ['out_refund', 'in_refund']:
+                record.x_excluded_billed_amount = -abs(total_exclusion)
+            else:
+                record.x_excluded_billed_amount = total_exclusion
+
+    @api.depends('x_amount_untaxed_in_company_currency', 'x_excluded_billed_amount', 'move_type')
     def _compute_billed_amount_adjustment(self):
         """
         Compute adjusted billed amount in company currency (PHP).
         Formula: Tax Excluded in Company Currency - Excluded Billed Amount
-        
-        This represents the actual billed amount after removing excluded accounts.
+        For refunds, sign should remain negative.
         """
         for record in self:
-            record.x_billed_amount_adjustment = record.x_amount_untaxed_in_company_currency - record.x_excluded_billed_amount
+            adjustment = record.x_amount_untaxed_in_company_currency - record.x_excluded_billed_amount
+            if record.move_type in ['out_refund', 'in_refund']:
+                record.x_billed_amount_adjustment = -abs(adjustment)
+            else:
+                record.x_billed_amount_adjustment = adjustment
 
 
 # BIR Report Customizations
